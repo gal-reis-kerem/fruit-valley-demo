@@ -19,6 +19,11 @@ const config = {
   pickingGroupName: process.env.PICKING_GROUP_NAME || '',
   photosGroupName: process.env.PHOTOS_GROUP_NAME || '',
   changesCutoff: process.env.CHANGES_CUTOFF || '14:00',
+  // WhatsApp Web is pinned to the last version compatible with whatsapp-web.js
+  // 1.34.x — the 2.3000.1043xxx rollout (July 2026) broke the library's
+  // injection (window.Store never gets built). Override via WWEB_VERSION once
+  // a fixed library release lands.
+  wwebVersion: process.env.WWEB_VERSION || '2.3000.1039710401-alpha',
   dataDir: path.join(ROOT, 'data'),
   outputDir: path.join(ROOT, 'output'),
   authDir: path.join(ROOT, '.wwebjs_auth'),
