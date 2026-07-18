@@ -16,7 +16,7 @@ async function main() {
   log.info('מפעיל את הדמו של פירות העמק…');
   log.info(`לקוח: ${config.customerName} | מספר מקור: ${config.sourceContact}`);
 
-  const client = createWhatsAppClient();
+  const client = await createWhatsAppClient();
 
   client.on('ready', async () => {
     log.info('וואטסאפ מחובר ✔');

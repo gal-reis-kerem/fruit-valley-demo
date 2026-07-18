@@ -1,13 +1,20 @@
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
+const puppeteer = require('puppeteer');
 const { config } = require('../config');
 const log = require('../logger');
 
-function createWhatsAppClient() {
+async function createWhatsAppClient() {
+  // whatsapp-web.js bundles its own (older) puppeteer whose Chrome download
+  // may be missing/corrupt — always launch the Chrome of the top-level
+  // puppeteer install, the same binary the PDF generator uses.
+  const executablePath = await puppeteer.executablePath();
+
   const client = new Client({
     authStrategy: new LocalAuth({ dataPath: config.authDir }),
     puppeteer: {
       headless: true,
+      executablePath,
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
     },
   });
