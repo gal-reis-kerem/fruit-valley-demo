@@ -30,6 +30,25 @@ class Orchestrator {
     store.saveDB(this.db);
   }
 
+  // msg.reply quotes the original message; on broken WhatsApp Web versions the
+  // quoting path can fail, so fall back to a plain send to the same chat.
+  async safeReply(msg, text) {
+    try {
+      return await msg.reply(text);
+    } catch (err) {
+      log.warn(`reply נכשל (${err.message}) - שולח בלי ציטוט`);
+      return this.client.sendMessage(msg.from, text);
+    }
+  }
+
+  async safeReact(msg, emoji) {
+    try {
+      await msg.react(emoji);
+    } catch (err) {
+      log.warn(`react נכשל (${err.message}) - ממשיך בלעדיו`);
+    }
+  }
+
   isAfterCutoff(now = new Date()) {
     const [h, m] = config.changesCutoff.split(':').map(Number);
     const israelNow = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' }));
@@ -49,7 +68,7 @@ class Orchestrator {
         await this.saveMediaToOrder(msg, open, 'customer-image');
         store.addHistory(open, 'customer_image_attached', 'תמונה מהלקוח צורפה להזמנה');
         this.save();
-        await msg.reply(`📎 התמונה צורפה להזמנה ${open.id}.`);
+        await this.safeReply(msg, `📎 התמונה צורפה להזמנה ${open.id}.`);
       }
       return;
     }
@@ -60,7 +79,7 @@ class Orchestrator {
       parsed = await parseOrderMessage(body);
     } catch (err) {
       log.error('פרסור הודעה נכשל:', err.message);
-      await msg.reply('⚠️ לא הצלחתי לעבד את ההודעה, נציג אנושי יטפל בה.');
+      await this.safeReply(msg, '⚠️ לא הצלחתי לעבד את ההודעה, נציג אנושי יטפל בה.');
       return;
     }
 
@@ -75,7 +94,7 @@ class Orchestrator {
       case 'cancellation':
         return this.handleCancellation(msg, parsed);
       default:
-        return msg.reply('👋 ההודעה התקבלה. אם זו הזמנה - נא לשלוח את רשימת הפריטים.');
+        return this.safeReply(msg, '👋 ההודעה התקבלה. אם זו הזמנה - נא לשלוח את רשימת הפריטים.');
     }
   }
 
@@ -94,7 +113,8 @@ class Orchestrator {
 
     // FR-02: immediate ack with order number + changes-cutoff guidance
     const deliveryHe = new Date(deliveryDate + 'T00:00:00').toLocaleDateString('he-IL');
-    await msg.reply(
+    await this.safeReply(
+        msg,
       `✅ ההזמנה התקבלה!\n` +
         `מספר הזמנה: *${order.id}*\n` +
         `לקוח: ${order.customerName}\n` +
@@ -132,7 +152,8 @@ class Orchestrator {
       .map((it) => `• ${it.product_he}${it.quantity ? ` - ${it.quantity} ${it.unit}` : ''}${it.note ? ` (${it.note})` : ''}`)
       .join('\n');
 
-    await msg.reply(
+    await this.safeReply(
+        msg,
       `✅ התוספת נקלטה ושויכה להזמנה *${order.id}*:\n${itemsList}` +
         (printed ? `\n\n⚠️ דף הליקוט כבר הודפס - התוספת תועבר למלקטים כתגובה בקבוצה.` : ''),
     );
@@ -158,12 +179,12 @@ class Orchestrator {
   async handleCancellation(msg, parsed) {
     const order = store.findOpenOrder(this.db, config.customerName);
     if (!order) {
-      return msg.reply('לא נמצאה הזמנה פתוחה לביטול.');
+      return this.safeReply(msg, 'לא נמצאה הזמנה פתוחה לביטול.');
     }
     order.status = 'cancelled';
     store.addHistory(order, 'order_cancelled', 'בוטלה לבקשת הלקוח');
     this.save();
-    await msg.reply(`🚫 הזמנה *${order.id}* בוטלה.`);
+    await this.safeReply(msg, `🚫 הזמנה *${order.id}* בוטלה.`);
     await this.client.sendMessage(
       this.pickingGroup.id._serialized,
       `🚫 *הזמנה ${order.id} (${order.customerName}) בוטלה* - נא לא ללקט.`,
@@ -241,11 +262,15 @@ class Orchestrator {
     // Prefer explicit attribution: a reply to the photo request / PDF message.
     let order = null;
     if (msg.hasQuotedMsg) {
-      const quoted = await msg.getQuotedMessage();
-      const qid = quoted.id._serialized;
-      order =
-        this.db.orders.find((o) => o.photoRequestMsgId === qid) ||
-        store.findByGroupMsgId(this.db, qid);
+      try {
+        const quoted = await msg.getQuotedMessage();
+        const qid = quoted.id._serialized;
+        order =
+          this.db.orders.find((o) => o.photoRequestMsgId === qid) ||
+          store.findByGroupMsgId(this.db, qid);
+      } catch (err) {
+        log.warn(`שליפת הודעה מצוטטת נכשלה (${err.message}) - משייך לפי הזמנה ממתינה`);
+      }
     }
     // Fallback (FR-13): attribute to the most recent order awaiting photos.
     if (!order) order = store.findAwaitingPhotos(this.db);
@@ -263,10 +288,10 @@ class Orchestrator {
       order.status = 'documented';
       store.addHistory(order, 'order_documented', 'התקבלו שתי תמונות התיעוד - ההזמנה מתועדת ומוכנה להמשך תהליך');
       this.save();
-      await msg.reply(`✅ הזמנה *${order.id}* תועדה במלואה (דף מסומן + משלוח ארוז). תודה!`);
+      await this.safeReply(msg, `✅ הזמנה *${order.id}* תועדה במלואה (דף מסומן + משלוח ארוז). תודה!`);
     } else {
       this.save();
-      await msg.react('👍');
+      await this.safeReact(msg, '👍');
     }
   }
 

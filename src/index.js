@@ -55,20 +55,27 @@ async function main() {
     log.info(`קבוצת ליקוט: "${pickingGroup.name}"${photosGroup ? ` | קבוצת תמונות: "${photosGroup.name}"` : ''}`);
     log.info('ממתין להזמנות… 🍎');
 
-    // Incoming messages
+    // Incoming messages. Everything is derived from msg.from directly —
+    // msg.getChat() goes through wwebjs's chat serializer, which is broken on
+    // current WhatsApp Web versions.
     client.on('message', async (msg) => {
       try {
-        const chat = await msg.getChat();
+        const chatId = msg.from; // '<phone>@c.us' private / '<id>@g.us' group
+        const isGroup = chatId.endsWith('@g.us');
 
         // 1) Private message from the configured customer number -> order flow
-        if (!chat.isGroup && msg.from === config.sourceContactId) {
-          await flow.handleCustomerMessage(msg);
+        if (!isGroup) {
+          if (chatId === config.sourceContactId) {
+            await flow.handleCustomerMessage(msg);
+          } else {
+            log.info(`הודעה פרטית ממספר לא מוגדר (${chatId}) - מתעלם`);
+          }
           return;
         }
 
         // 2) Media inside the picking/photos group -> evidence photos
-        const inPickingGroup = chat.isGroup && chat.id._serialized === pickingGroup.id._serialized;
-        const inPhotosGroup = photosGroup && chat.isGroup && chat.id._serialized === photosGroup.id._serialized;
+        const inPickingGroup = chatId === pickingGroup.id._serialized;
+        const inPhotosGroup = photosGroup && chatId === photosGroup.id._serialized;
         if ((inPickingGroup || inPhotosGroup) && msg.hasMedia) {
           await flow.handleGroupMedia(msg);
         }
