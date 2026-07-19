@@ -13,11 +13,46 @@ const state = { client: null, state: 'stopped', running: false, qr: null };
 async function startWhatsApp() {
   if (state.running) return;
   state.running = true;
+  await launchClient(1);
+}
+
+// Self-healing launcher. Right after the Mac wakes from sleep the network may
+// not be up yet and WhatsApp Web can hang forever between 'authenticated' and
+// 'ready' — a watchdog detects the stall and relaunches the browser (up to 3
+// attempts). A mid-day disconnect triggers an automatic reconnect too.
+async function launchClient(attempt) {
   state.state = 'starting';
   state.qr = null;
 
   const client = await createWhatsAppClient();
   state.client = client;
+  let ready = false;
+
+  const relaunch = async (reason) => {
+    if (!state.running || state.client !== client) return;
+    try {
+      await client.destroy();
+    } catch (err) { /* already dead */ }
+    state.client = null;
+    if (attempt >= 3) {
+      state.running = false;
+      state.state = 'stopped';
+      log.error('החיבור נכשל 3 פעמים ברצף - נעצר. בדוק חיבור אינטרנט והפעל מחדש ממסך הבקרה או npm start.');
+      return;
+    }
+    log.warn(`${reason} - מפעיל מחדש את החיבור (ניסיון ${attempt + 1}/3)…`);
+    launchClient(attempt + 1).catch((err) => log.error('הפעלה מחדש נכשלה:', err.message));
+  };
+
+  const watchdog = setInterval(() => {
+    if (ready || !state.running || state.client !== client) {
+      clearInterval(watchdog);
+      return;
+    }
+    if (state.state === 'qr') return; // human is scanning - keep waiting
+    clearInterval(watchdog);
+    relaunch('החיבור נתקע (לא הבשיל תוך 90 שניות)');
+  }, 90000);
 
   client.on('qr', (qr) => {
     state.qr = qr;
@@ -29,9 +64,13 @@ async function startWhatsApp() {
   });
   client.on('disconnected', () => {
     state.state = 'disconnected';
+    setTimeout(() => relaunch('החיבור לוואטסאפ נותק'), 10000);
   });
 
   client.on('ready', async () => {
+    ready = true;
+    attempt = 1; // a successful connection resets the retry budget
+    clearInterval(watchdog);
     log.info('וואטסאפ מחובר ✔ (טוען את רשימת הקבוצות - אחרי קישור ראשון זה יכול לקחת עד דקה)');
 
     let groups;
