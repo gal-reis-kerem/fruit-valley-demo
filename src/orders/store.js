@@ -32,21 +32,35 @@ function customerDir(order) {
   return dir;
 }
 
-// File-name base: "Kerem-Capital[-<detail>]-<ddmmyyyy>-V<version>"
+// File-name base: "Kerem-Capital[-<detail>]-<ddmmyyyy>[-<seq>]-V<version>"
 // <detail> is an optional per-order qualifier (floor/building, e.g. "f2").
 function orderFileBase(order) {
   const [y, m, d] = order.deliveryDate.split('-');
   const parts = [(order.customerNameEn || config.customerNameEn).replace(/\s+/g, '-')];
   if (order.locationDetail) parts.push(String(order.locationDetail).replace(/\s+/g, '-'));
-  parts.push(`${d}${m}${y}`, `V${order.version}`);
+  parts.push(`${d}${m}${y}`);
+  const seqSuffix = order.id && order.id.match(/-(\d+)$/u);
+  if (seqSuffix && order.id.endsWith(`-${seqSuffix[1]}`) && seqSuffix[1].length <= 2) parts.push(seqSuffix[1]);
+  parts.push(`V${order.version}`);
   return parts.join('-');
 }
 
-// Order id: KC-YYYYMMDD-NN, numbered per delivery date
+// Unified order number: <initials>-<ddmmyyyy>, e.g. KC-20072026. One order per
+// customer per delivery date (the daily "board") — the same number appears in
+// the customer ack, the PDF, the group caption and the photo request. The
+// PDF file version (Vx) advances with each sheet update. In the rare case a
+// second separate order is opened for a date whose board was already closed,
+// a -2/-3 suffix is added.
 function nextOrderId(db, deliveryDate) {
-  const datePart = deliveryDate.replace(/-/g, '');
-  const count = db.orders.filter((o) => o.deliveryDate === deliveryDate).length;
-  return `KC-${datePart}-${String(count + 1).padStart(2, '0')}`;
+  const [y, m, d] = deliveryDate.split('-');
+  const base = `${config.customerInitials}-${d}${m}${y}`;
+  let id = base;
+  let seq = 1;
+  while (db.orders.some((o) => o.id === id)) {
+    seq += 1;
+    id = `${base}-${seq}`;
+  }
+  return id;
 }
 
 function addHistory(order, action, detail) {
@@ -93,13 +107,38 @@ function createOrder(db, { deliveryDate, customerName, customerNameEn, customerN
   return order;
 }
 
+const CLOSED_STATUSES = ['documented', 'cancelled', 'archived'];
+
+function todayIsrael() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' });
+}
+
 // The order that additions/changes/photos should attach to: the most recent
-// order of this customer that is not yet documented/cancelled.
+// order of this customer that is still open and not stale (delivery today or
+// later — old test boards must not swallow new messages).
 function findOpenOrder(db, customerName) {
   const open = db.orders
-    .filter((o) => o.customerName === customerName && !['documented', 'cancelled'].includes(o.status))
+    .filter(
+      (o) =>
+        o.customerName === customerName &&
+        !CLOSED_STATUSES.includes(o.status) &&
+        o.deliveryDate >= todayIsrael(),
+    )
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   return open[0] || null;
+}
+
+// The daily board: the open order of this customer for a specific delivery
+// date. A second "new order" message for the same date merges into it.
+function findOpenOrderForDate(db, customerName, deliveryDate) {
+  return (
+    db.orders.find(
+      (o) =>
+        o.customerName === customerName &&
+        o.deliveryDate === deliveryDate &&
+        !CLOSED_STATUSES.includes(o.status),
+    ) || null
+  );
 }
 
 function findByGroupMsgId(db, msgId) {
@@ -118,6 +157,7 @@ module.exports = {
   saveDB,
   createOrder,
   findOpenOrder,
+  findOpenOrderForDate,
   findByGroupMsgId,
   findAwaitingPhotos,
   addHistory,

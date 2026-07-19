@@ -5,7 +5,7 @@ const log = require('../logger');
 const { parseOrderMessage } = require('../ai/parser');
 const store = require('../orders/store');
 const { generatePickingSheetPDF } = require('../pdf/generator');
-const { MessageMedia } = require('../whatsapp/client');
+const { MessageMedia, sendAndConfirm } = require('../whatsapp/client');
 const replies = require('./replies');
 
 /**
@@ -95,13 +95,32 @@ class Orchestrator {
       case 'cancellation':
         return this.handleCancellation(msg, parsed);
       default:
-        return this.safeReply(msg, replies.general());
+        return this.safeReply(msg, this.customerText(parsed, null, replies.general()));
     }
+  }
+
+  // Claude writes the customer-facing reply (natural, varies every message);
+  // {{ORDER}} is replaced with the unified order number. Falls back to the
+  // static variants if the model omitted the token.
+  customerText(parsed, order, fallback) {
+    const t = parsed && parsed.reply_text;
+    if (!t) return fallback;
+    if (!order) return t;
+    if (!t.includes('{{ORDER}}')) return fallback;
+    return t.split('{{ORDER}}').join(order.id);
   }
 
   async handleNewOrder(msg, parsed, rawBody) {
     const deliveryDate =
       parsed.delivery_date || new Date(Date.now() + 24 * 3600 * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' });
+
+    // One board per customer per delivery date: a second "new order" message
+    // for the same date merges into the existing open order.
+    const existing = store.findOpenOrderForDate(this.db, config.customerName, deliveryDate);
+    if (existing) {
+      log.info(`כבר קיימת הזמנה פתוחה ל-${deliveryDate} (${existing.id}) - ההודעה מתמזגת לתוכה`);
+      return this.applyAddition(msg, existing, parsed, rawBody);
+    }
 
     const order = store.createOrder(this.db, {
       deliveryDate,
@@ -114,8 +133,8 @@ class Orchestrator {
     });
     this.save();
 
-    // FR-02: immediate, human-sounding ack with the order number
-    await this.safeReply(msg, replies.newOrder(order, config.changesCutoff));
+    // FR-02: immediate, human-sounding ack with the unified order number
+    await this.safeReply(msg, this.customerText(parsed, order, replies.newOrder(order, config.changesCutoff)));
 
     await this.sendPickingSheet(order);
   }
@@ -127,13 +146,19 @@ class Orchestrator {
       log.info('אין הזמנה פתוחה - התוספת נפתחת כהזמנה חדשה');
       return this.handleNewOrder(msg, parsed, rawBody);
     }
+    return this.applyAddition(msg, order, parsed, rawBody);
+  }
 
-    // FR-09: attach the addition to the right order and record whether it
-    // arrived before or after the sheet was printed.
+  // FR-09: attach an addition/merged message to the order and record whether
+  // it arrived before or after the sheet was printed.
+  async applyAddition(msg, order, parsed, rawBody) {
     const printed = ['picking', 'awaiting_photos'].includes(order.status);
     const late = this.isAfterCutoff();
     for (const item of parsed.items) {
       order.items.push({ ...item, addedAfterPrint: printed, addedLate: !printed && late });
+    }
+    if (parsed.customer_note) {
+      order.customerNote = order.customerNote ? `${order.customerNote} | ${parsed.customer_note}` : parsed.customer_note;
     }
     order.rawMessages.push(rawBody);
     store.addHistory(
@@ -146,12 +171,16 @@ class Orchestrator {
       .map((it) => `• ${it.product_he}${it.quantity ? ` - ${it.quantity} ${it.unit}` : ''}${it.note ? ` (${it.note})` : ''}`)
       .join('\n');
 
-    await this.safeReply(msg, printed ? replies.additionAfterPrint(order) : replies.addition(order));
+    await this.safeReply(
+      msg,
+      this.customerText(parsed, order, printed ? replies.additionAfterPrint(order) : replies.addition(order)),
+    );
 
     if (printed) {
       // Sheet already printed: reply to the PDF message in the picking group
       // (mirrors the real-world "reply to the PDF" practice).
-      await this.client.sendMessage(
+      await sendAndConfirm(
+        this.client,
         this.pickingGroup.id._serialized,
         `➕ *תוספת להזמנה ${order.id}* (${order.customerName}):\n${itemsList}`,
         order.groupMsgId ? { quotedMessageId: order.groupMsgId } : {},
@@ -174,8 +203,9 @@ class Orchestrator {
     order.status = 'cancelled';
     store.addHistory(order, 'order_cancelled', 'בוטלה לבקשת הלקוח');
     this.save();
-    await this.safeReply(msg, replies.cancellation(order));
-    await this.client.sendMessage(
+    await this.safeReply(msg, this.customerText(parsed, order, replies.cancellation(order)));
+    await sendAndConfirm(
+      this.client,
       this.pickingGroup.id._serialized,
       `🚫 *הזמנה ${order.id} (${order.customerName}) בוטלה* - נא לא ללקט.`,
       order.groupMsgId ? { quotedMessageId: order.groupMsgId } : {},
@@ -197,12 +227,16 @@ class Orchestrator {
       `פריטים: ${order.items.length}\n\n` +
       `👍 סמנו בריאקשן על ההודעה כשהדף הודפס והליקוט החל`;
 
-    const sent = await this.client.sendMessage(this.pickingGroup.id._serialized, media, {
+    const msgId = await sendAndConfirm(this.client, this.pickingGroup.id._serialized, media, {
       caption,
       sendMediaAsDocument: true,
     });
 
-    order.groupMsgId = sent.id._serialized;
+    if (msgId) {
+      order.groupMsgId = msgId;
+    } else {
+      log.warn('לא אותר מזהה להודעת ה-PDF - ריאקשן יזוהה לפי ההזמנה האחרונה שנשלחה');
+    }
     order.status = 'sent_to_group';
     store.addHistory(order, 'pdf_sent_to_group', `גרסה ${order.version} נשלחה לקבוצה "${this.pickingGroup.name}"`);
     this.save();
@@ -215,7 +249,20 @@ class Orchestrator {
     const msgId = reaction.msgId && reaction.msgId._serialized;
     if (!msgId) return;
 
-    const order = store.findByGroupMsgId(this.db, msgId);
+    let order = store.findByGroupMsgId(this.db, msgId);
+    // Fallback: the PDF's message id may be unknown (send confirmation failed).
+    // If the reaction happened in the picking group, adopt the most recent
+    // order that is waiting for one.
+    if (!order && msgId.includes(this.pickingGroup.id._serialized)) {
+      order =
+        this.db.orders
+          .filter((o) => o.status === 'sent_to_group')
+          .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] || null;
+      if (order && !order.groupMsgId) {
+        order.groupMsgId = msgId;
+        store.addHistory(order, 'group_msg_adopted', 'מזהה הודעת ה-PDF אומץ מהריאקשן');
+      }
+    }
     if (!order || order.status !== 'sent_to_group') return;
 
     order.status = 'picking';
@@ -239,9 +286,9 @@ class Orchestrator {
 
     const targetChat = this.photosGroup || this.pickingGroup;
     const opts = !this.photosGroup && order.groupMsgId ? { quotedMessageId: order.groupMsgId } : {};
-    const sent = await this.client.sendMessage(targetChat.id._serialized, requestText, opts);
+    const requestMsgId = await sendAndConfirm(this.client, targetChat.id._serialized, requestText, opts);
 
-    order.photoRequestMsgId = sent.id._serialized;
+    order.photoRequestMsgId = requestMsgId; // null is fine — photos attach via fallback
     order.status = 'awaiting_photos';
     store.addHistory(order, 'photo_request_sent', `נשלחה לקבוצה "${targetChat.name}"`);
     this.save();

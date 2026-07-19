@@ -18,6 +18,11 @@ const config = {
   customerName: process.env.CUSTOMER_NAME || 'כרם קפיטל',
   // Latin name used for the customer folder and PDF file names
   customerNameEn: process.env.CUSTOMER_NAME_EN || 'Kerem Capital',
+  // "Kerem Capital" -> "KC"; prefix of the unified order number (KC-<ddmmyyyy>)
+  customerInitials: (process.env.CUSTOMER_NAME_EN || 'Kerem Capital')
+    .split(/\s+/)
+    .map((w) => w[0].toUpperCase())
+    .join(''),
   webPort: Number(process.env.WEB_PORT || 3010),
   pickingGroupName: process.env.PICKING_GROUP_NAME || '',
   photosGroupName: process.env.PHOTOS_GROUP_NAME || '',

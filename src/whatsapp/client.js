@@ -128,4 +128,40 @@ async function findGroupByName(client, name, opts) {
   return found ? { id: { _serialized: found.id }, name: found.name } : null;
 }
 
-module.exports = { createWhatsAppClient, findGroupByName, listGroups, resolvePhoneId, MessageMedia };
+// On the pinned WhatsApp Web version, client.sendMessage often DELIVERS the
+// message but resolves to undefined (the response serializer is broken).
+// Send, then recover the real message id from the chat's own message log so
+// reaction-matching and quoted replies keep working.
+async function sendAndConfirm(client, chatId, content, options = {}) {
+  let sent = null;
+  try {
+    sent = await client.sendMessage(chatId, content, options);
+  } catch (err) {
+    log.warn(`sendMessage זרק שגיאה (${err.message}) - בודק אם ההודעה בכל זאת נשלחה`);
+  }
+  if (sent && sent.id && sent.id._serialized) return sent.id._serialized;
+
+  // Fallback: fetch the id of the last message we sent in this chat
+  try {
+    await sleep(1500);
+    const msgId = await client.pupPage.evaluate((id) => {
+      const wid = window.require('WAWebWidFactory').createWid(id);
+      const chat = window.require('WAWebCollections').Chat.get(wid);
+      if (!chat) return null;
+      const msgs = chat.msgs.getModelsArray();
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].id && msgs[i].id.fromMe) return msgs[i].id._serialized;
+      }
+      return null;
+    }, chatId);
+    if (msgId) {
+      log.info('ההודעה נשלחה (המזהה אותר בערוץ הגיבוי)');
+      return msgId;
+    }
+  } catch (err) {
+    log.warn(`אחזור מזהה הודעה נכשל: ${err.message}`);
+  }
+  return null;
+}
+
+module.exports = { createWhatsAppClient, findGroupByName, listGroups, resolvePhoneId, sendAndConfirm, MessageMedia };

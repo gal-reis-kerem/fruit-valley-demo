@@ -8,8 +8,13 @@ const client = new Anthropic();
 const ORDER_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['classification', 'delivery_date', 'customer_note', 'location_detail', 'items'],
+  required: ['classification', 'delivery_date', 'customer_note', 'location_detail', 'reply_text', 'items'],
   properties: {
+    reply_text: {
+      type: 'string',
+      description:
+        'A short, warm, natural Hebrew WhatsApp reply to the customer, written like a human operations person (not a bot). Must contain the literal token {{ORDER}} exactly once where the order number belongs, for every order-related classification (new_order/addition/change/cancellation). Vary the phrasing naturally between messages. For general messages: a friendly short reply without {{ORDER}}.',
+    },
     location_detail: {
       type: ['string', 'null'],
       description:
@@ -89,7 +94,8 @@ Rules:
 - vat_exempt = true only for fresh fruits & vegetables.
 - Classification: if the message contains a list of products with no reference to a previous order today, it is new_order. Words like "תוסיפו", "עוד", "שכחתי" indicate addition. "תורידו", "במקום" indicate change. "תבטלו" indicates cancellation. Anything with no order content is general.
 - delivery_date: resolve relative dates ("מחר", "ליום ראשון") to an absolute date. Default: tomorrow (orders are normally for the next day).
-- Keep item order stable within each category (as written by the customer).`;
+- Keep item order stable within each category (as written by the customer).
+- reply_text: write the WhatsApp reply we send back to the customer. Sound like a friendly human coordinator, in casual Hebrew, 1-2 short sentences, at most one emoji. Include the token {{ORDER}} exactly once (it is replaced with the order number). Examples of tone (do NOT copy verbatim, invent your own variation each time): "קיבלתי 🙌 ההזמנה יצאה לליקוט, מספר הזמנה {{ORDER}}", "מעולה, הכל נקלט! ההזמנה שלך ({{ORDER}}) כבר אצל המלקטים". For additions: acknowledge the addition and mention it joined order {{ORDER}}. Mirror the customer's energy (if they are brief - be brief).`;
 
 /**
  * Parse a raw WhatsApp message into a structured order.

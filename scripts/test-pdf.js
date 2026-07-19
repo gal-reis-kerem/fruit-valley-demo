@@ -3,8 +3,9 @@
 const { generatePickingSheetPDF, closeBrowser } = require('../src/pdf/generator');
 
 const sampleOrder = {
-  id: 'KC-DEMO-01',
-  customerName: 'כרם קפיטל',
+  id: 'DS-DEMO',
+  customerName: 'לקוח לדוגמה',
+  customerNameEn: 'Demo-Sample',
   deliveryDate: new Date(Date.now() + 24 * 3600 * 1000).toISOString().slice(0, 10),
   customerNote: 'נא להקפיד על טריות - האירוע מחר בצהריים',
   version: 1,
