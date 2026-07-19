@@ -8,8 +8,13 @@ const client = new Anthropic();
 const ORDER_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['classification', 'delivery_date', 'customer_note', 'items'],
+  required: ['classification', 'delivery_date', 'customer_note', 'location_detail', 'items'],
   properties: {
+    location_detail: {
+      type: ['string', 'null'],
+      description:
+        'Short latin qualifier when the order is for a specific floor/building/site, e.g. "f2" for "קומה 2", "b1" for building 1. null when not mentioned.',
+    },
     classification: {
       type: 'string',
       enum: ['new_order', 'addition', 'change', 'cancellation', 'general'],

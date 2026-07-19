@@ -24,10 +24,22 @@ function saveDB(db) {
   fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
 }
 
-function orderDir(order) {
-  const dir = path.join(config.outputDir, order.id);
+// One flat folder per customer: output/<Customer Name>/, PDFs and photos
+// side by side (no per-order subfolders).
+function customerDir(order) {
+  const dir = path.join(config.outputDir, order.customerNameEn || config.customerNameEn);
   fs.mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+// File-name base: "Kerem-Capital[-<detail>]-<ddmmyyyy>-V<version>"
+// <detail> is an optional per-order qualifier (floor/building, e.g. "f2").
+function orderFileBase(order) {
+  const [y, m, d] = order.deliveryDate.split('-');
+  const parts = [(order.customerNameEn || config.customerNameEn).replace(/\s+/g, '-')];
+  if (order.locationDetail) parts.push(String(order.locationDetail).replace(/\s+/g, '-'));
+  parts.push(`${d}${m}${y}`, `V${order.version}`);
+  return parts.join('-');
 }
 
 // Order id: KC-YYYYMMDD-NN, numbered per delivery date
@@ -55,10 +67,12 @@ function addHistory(order, action, detail) {
  *   documented      -> both photos received
  *   cancelled
  */
-function createOrder(db, { deliveryDate, customerName, customerNote, items, rawMessage }) {
+function createOrder(db, { deliveryDate, customerName, customerNameEn, customerNote, locationDetail, items, rawMessage }) {
   const order = {
     id: nextOrderId(db, deliveryDate),
     customerName,
+    customerNameEn: customerNameEn || config.customerNameEn,
+    locationDetail: locationDetail || null,
     deliveryDate,
     customerNote: customerNote || null,
     items,
@@ -107,5 +121,6 @@ module.exports = {
   findByGroupMsgId,
   findAwaitingPhotos,
   addHistory,
-  orderDir,
+  customerDir,
+  orderFileBase,
 };

@@ -1,7 +1,7 @@
 const path = require('path');
 const puppeteer = require('puppeteer');
 const { buildPickingSheetHTML } = require('./template');
-const { orderDir } = require('../orders/store');
+const { customerDir, orderFileBase } = require('../orders/store');
 const { config } = require('../config');
 
 let browserPromise = null;
@@ -26,8 +26,8 @@ async function generatePickingSheetPDF(order) {
   try {
     const html = buildPickingSheetHTML(order, { changesCutoff: config.changesCutoff });
     await page.setContent(html, { waitUntil: 'networkidle0' });
-    const fileName = `${order.id}-v${order.version}.pdf`;
-    const pdfPath = path.join(orderDir(order), fileName);
+    const fileName = `${orderFileBase(order)}.pdf`;
+    const pdfPath = path.join(customerDir(order), fileName);
     await page.pdf({
       path: pdfPath,
       format: 'A4',

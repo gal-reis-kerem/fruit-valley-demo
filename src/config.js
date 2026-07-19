@@ -16,6 +16,9 @@ const config = {
   sourceContact: normalizePhone(process.env.SOURCE_CONTACT_NUMBER || '0557118125'),
   sourceContactId: normalizePhone(process.env.SOURCE_CONTACT_NUMBER || '0557118125') + '@c.us',
   customerName: process.env.CUSTOMER_NAME || 'כרם קפיטל',
+  // Latin name used for the customer folder and PDF file names
+  customerNameEn: process.env.CUSTOMER_NAME_EN || 'Kerem Capital',
+  webPort: Number(process.env.WEB_PORT || 3010),
   pickingGroupName: process.env.PICKING_GROUP_NAME || '',
   photosGroupName: process.env.PHOTOS_GROUP_NAME || '',
   changesCutoff: process.env.CHANGES_CUTOFF || '14:00',

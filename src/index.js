@@ -1,36 +1,35 @@
 const { config } = require('./config');
 const log = require('./logger');
 const { createWhatsAppClient, listGroups, resolvePhoneId } = require('./whatsapp/client');
+const { Orchestrator } = require('./flow/orchestrator');
+const { startWebServer } = require('./web/server');
 
 // A single failed operation must not kill the whole digital worker (NFR-07)
 process.on('unhandledRejection', (err) => log.error('שגיאה לא מטופלת:', err));
-const { Orchestrator } = require('./flow/orchestrator');
 
-async function main() {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    log.error('חסר ANTHROPIC_API_KEY - העתק את .env.example ל-.env ומלא את המפתח.');
-    process.exit(1);
-  }
-  if (!config.pickingGroupName) {
-    log.error('חסר PICKING_GROUP_NAME בקובץ .env (שם קבוצת הליקוט בוואטסאפ).');
-    process.exit(1);
-  }
+// Shared connection state, exposed to the local control panel
+const state = { client: null, state: 'stopped', running: false, qr: null };
 
-  log.info('מפעיל את הדמו של פירות העמק…');
-  log.info(`לקוח: ${config.customerName} | מספר מקור: ${config.sourceContact}`);
-
-  const keyCheck = await require('./ai/parser').checkApiKey();
-  if (keyCheck.ok) {
-    log.info('מפתח Anthropic תקין ✔');
-  } else if (/credit balance is too low/i.test(keyCheck.error)) {
-    log.error('למפתח ה-Anthropic אין יתרת קרדיט - יש לטעון קרדיט ב-console.anthropic.com ← Plans & Billing.');
-    log.warn('האפליקציה תעלה, אבל פרסור הזמנות ייכשל עד שיהיה קרדיט.');
-  } else {
-    log.error('בדיקת מפתח Anthropic נכשלה:', keyCheck.error);
-    log.warn('האפליקציה תעלה, אבל פרסור הזמנות עלול להיכשל.');
-  }
+async function startWhatsApp() {
+  if (state.running) return;
+  state.running = true;
+  state.state = 'starting';
+  state.qr = null;
 
   const client = await createWhatsAppClient();
+  state.client = client;
+
+  client.on('qr', (qr) => {
+    state.qr = qr;
+    state.state = 'qr';
+  });
+  client.on('authenticated', () => {
+    state.qr = null;
+    state.state = 'starting';
+  });
+  client.on('disconnected', () => {
+    state.state = 'disconnected';
+  });
 
   client.on('ready', async () => {
     log.info('וואטסאפ מחובר ✔ (טוען את רשימת הקבוצות - אחרי קישור ראשון זה יכול לקחת עד דקה)');
@@ -64,6 +63,7 @@ async function main() {
 
     const flow = new Orchestrator(client, { pickingGroup, photosGroup });
     log.info(`קבוצת ליקוט: "${pickingGroup.name}"${photosGroup ? ` | קבוצת תמונות: "${photosGroup.name}"` : ''}`);
+    state.state = 'connected';
     log.info('ממתין להזמנות… 🍎');
 
     // Incoming messages. Everything is derived from msg.from directly —
@@ -108,6 +108,55 @@ async function main() {
   });
 
   await client.initialize();
+}
+
+async function stopWhatsApp() {
+  if (!state.client) return;
+  log.info('עוצר את חיבור הוואטסאפ (הסשן נשמר - לא יידרש QR מחדש)…');
+  try {
+    await state.client.destroy();
+  } catch (err) {
+    log.warn('עצירה לא נקייה:', err.message);
+  }
+  state.client = null;
+  state.running = false;
+  state.state = 'stopped';
+  state.qr = null;
+  log.info('החיבור נעצר. אפשר להפעיל מחדש מהמסך או עם npm start');
+}
+
+async function main() {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    log.error('חסר ANTHROPIC_API_KEY - העתק את .env.example ל-.env ומלא את המפתח.');
+    process.exit(1);
+  }
+  if (!config.pickingGroupName) {
+    log.error('חסר PICKING_GROUP_NAME בקובץ .env (שם קבוצת הליקוט בוואטסאפ).');
+    process.exit(1);
+  }
+
+  log.info('מפעיל את הדמו של פירות העמק…');
+  log.info(`לקוח: ${config.customerName} | מספר מקור: ${config.sourceContact}`);
+
+  const keyCheck = await require('./ai/parser').checkApiKey();
+  if (keyCheck.ok) {
+    log.info('מפתח Anthropic תקין ✔');
+  } else if (/credit balance is too low/i.test(keyCheck.error)) {
+    log.error('למפתח ה-Anthropic אין יתרת קרדיט - יש לטעון קרדיט ב-console.anthropic.com ← Plans & Billing.');
+    log.warn('האפליקציה תעלה, אבל פרסור הזמנות ייכשל עד שיהיה קרדיט.');
+  } else {
+    log.error('בדיקת מפתח Anthropic נכשלה:', keyCheck.error);
+    log.warn('האפליקציה תעלה, אבל פרסור הזמנות עלול להיכשל.');
+  }
+
+  startWebServer({
+    getState: () => ({ state: state.state, running: state.running }),
+    getQr: () => state.qr,
+    start: startWhatsApp,
+    stop: stopWhatsApp,
+  });
+
+  await startWhatsApp();
 }
 
 main().catch((err) => {

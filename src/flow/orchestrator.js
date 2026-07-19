@@ -6,6 +6,7 @@ const { parseOrderMessage } = require('../ai/parser');
 const store = require('../orders/store');
 const { generatePickingSheetPDF } = require('../pdf/generator');
 const { MessageMedia } = require('../whatsapp/client');
+const replies = require('./replies');
 
 /**
  * The core business flow (PRD "זרימת המוצר המרכזית", steps 1-8):
@@ -94,7 +95,7 @@ class Orchestrator {
       case 'cancellation':
         return this.handleCancellation(msg, parsed);
       default:
-        return this.safeReply(msg, '👋 ההודעה התקבלה. אם זו הזמנה - נא לשלוח את רשימת הפריטים.');
+        return this.safeReply(msg, replies.general());
     }
   }
 
@@ -105,23 +106,16 @@ class Orchestrator {
     const order = store.createOrder(this.db, {
       deliveryDate,
       customerName: config.customerName,
+      customerNameEn: config.customerNameEn,
       customerNote: parsed.customer_note,
+      locationDetail: parsed.location_detail,
       items: parsed.items,
       rawMessage: rawBody,
     });
     this.save();
 
-    // FR-02: immediate ack with order number + changes-cutoff guidance
-    const deliveryHe = new Date(deliveryDate + 'T00:00:00').toLocaleDateString('he-IL');
-    await this.safeReply(
-        msg,
-      `✅ ההזמנה התקבלה!\n` +
-        `מספר הזמנה: *${order.id}*\n` +
-        `לקוח: ${order.customerName}\n` +
-        `אספקה: ${deliveryHe}\n` +
-        `פריטים: ${order.items.length}\n\n` +
-        `ניתן לשלוח שינויים ותוספות עד השעה ${config.changesCutoff}.`,
-    );
+    // FR-02: immediate, human-sounding ack with the order number
+    await this.safeReply(msg, replies.newOrder(order, config.changesCutoff));
 
     await this.sendPickingSheet(order);
   }
@@ -152,11 +146,7 @@ class Orchestrator {
       .map((it) => `• ${it.product_he}${it.quantity ? ` - ${it.quantity} ${it.unit}` : ''}${it.note ? ` (${it.note})` : ''}`)
       .join('\n');
 
-    await this.safeReply(
-        msg,
-      `✅ התוספת נקלטה ושויכה להזמנה *${order.id}*:\n${itemsList}` +
-        (printed ? `\n\n⚠️ דף הליקוט כבר הודפס - התוספת תועבר למלקטים כתגובה בקבוצה.` : ''),
-    );
+    await this.safeReply(msg, printed ? replies.additionAfterPrint(order) : replies.addition(order));
 
     if (printed) {
       // Sheet already printed: reply to the PDF message in the picking group
@@ -184,7 +174,7 @@ class Orchestrator {
     order.status = 'cancelled';
     store.addHistory(order, 'order_cancelled', 'בוטלה לבקשת הלקוח');
     this.save();
-    await this.safeReply(msg, `🚫 הזמנה *${order.id}* בוטלה.`);
+    await this.safeReply(msg, replies.cancellation(order));
     await this.client.sendMessage(
       this.pickingGroup.id._serialized,
       `🚫 *הזמנה ${order.id} (${order.customerName}) בוטלה* - נא לא ללקט.`,
@@ -234,16 +224,18 @@ class Orchestrator {
     this.save();
     log.info(`הזמנה ${order.id}: זוהה ריאקשן ${reaction.reaction} - הליקוט החל`);
 
-    // FR-12: photo request with company, order number and date
-    const deliveryHe = new Date(order.deliveryDate + 'T00:00:00').toLocaleDateString('he-IL');
+    // One photo request per order — a reaction on an updated sheet (v2+) must
+    // not create a second request.
+    if (order.photoRequestMsgId) {
+      order.status = 'awaiting_photos';
+      this.save();
+      return;
+    }
+
+    // FR-12: photo request attributed to the order
     const requestText =
-      `📸 *בקשת תמונות תיעוד*\n` +
-      `חברה: ${order.customerName}\n` +
-      `הזמנה: ${order.id}\n` +
-      `תאריך אספקה: ${deliveryHe}\n\n` +
-      `בסיום הליקוט נא לצרף כתגובה להודעה זו:\n` +
-      `1️⃣ תמונת דף הליקוט המסומן (עם ההערות)\n` +
-      `2️⃣ תמונת המשלוח הארוז`;
+      `📸 הזמנה מספר *${order.id}* לחברת *${order.customerName}*:\n` +
+      `נא להגיב על ההודעה הזו לאחר סיום הליקוט עם תמונת המשלוח הארוז ותמונת דף הליקוט.`;
 
     const targetChat = this.photosGroup || this.pickingGroup;
     const opts = !this.photosGroup && order.groupMsgId ? { quotedMessageId: order.groupMsgId } : {};
@@ -288,7 +280,7 @@ class Orchestrator {
       order.status = 'documented';
       store.addHistory(order, 'order_documented', 'התקבלו שתי תמונות התיעוד - ההזמנה מתועדת ומוכנה להמשך תהליך');
       this.save();
-      await this.safeReply(msg, `✅ הזמנה *${order.id}* תועדה במלואה (דף מסומן + משלוח ארוז). תודה!`);
+      await this.safeReply(msg, replies.documented(order));
     } else {
       this.save();
       await this.safeReact(msg, '👍');
@@ -300,8 +292,8 @@ class Orchestrator {
       const media = await msg.downloadMedia();
       if (!media) return null;
       const ext = (media.mimetype || 'image/jpeg').split('/')[1].split(';')[0];
-      const fileName = `${prefix}-${order.photos.length + 1}-${Date.now()}.${ext}`;
-      const filePath = path.join(store.orderDir(order), fileName);
+      const fileName = `${store.orderFileBase(order)}-${prefix}-${order.photos.length + 1}.${ext}`;
+      const filePath = path.join(store.customerDir(order), fileName);
       fs.writeFileSync(filePath, Buffer.from(media.data, 'base64'));
       order.photos.push({ path: filePath, from: msg.author || msg.from, at: new Date().toISOString() });
       return filePath;
