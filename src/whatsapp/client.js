@@ -39,6 +39,47 @@ async function createWhatsAppClient() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// WhatsApp's LID privacy layer: private messages can arrive from an anonymized
+// '<id>@lid' instead of '<phone>@c.us'. Resolve back to the phone id so we can
+// match the configured customer number. Results are cached per session.
+const lidCache = new Map();
+
+async function resolvePhoneId(client, chatId) {
+  if (!chatId || !chatId.endsWith('@lid')) return chatId;
+  if (lidCache.has(chatId)) return lidCache.get(chatId);
+  let resolved = chatId;
+  try {
+    const pn = await client.pupPage.evaluate((id) => {
+      const wid = window.require('WAWebWidFactory').createWid(id);
+      try {
+        const { toPn } = window.require('WAWebLidMigrationUtils');
+        const r = toPn(wid);
+        if (r && r._serialized) return r._serialized;
+      } catch (e) { /* try next strategy */ }
+      try {
+        const api = window.require('WAWebApiContact');
+        if (api.getPhoneNumber) {
+          const r = api.getPhoneNumber(wid);
+          if (r && r._serialized) return r._serialized;
+        }
+      } catch (e) { /* try next strategy */ }
+      try {
+        const contact =
+          window.require('WAWebCollections').Contact?.get(wid) ||
+          window.require('WAWebContactCollection').ContactCollection?.get(wid);
+        const r = contact && contact.phoneNumber;
+        if (r) return r._serialized || String(r);
+      } catch (e) { /* give up */ }
+      return null;
+    }, chatId);
+    if (pn) resolved = pn;
+  } catch (err) {
+    log.warn(`תרגום LID נכשל עבור ${chatId}: ${err.message}`);
+  }
+  lidCache.set(chatId, resolved);
+  return resolved;
+}
+
 /**
  * List all groups as lightweight {id, name} objects.
  * Right after a first-time QR link, chats are still syncing and
@@ -87,4 +128,4 @@ async function findGroupByName(client, name, opts) {
   return found ? { id: { _serialized: found.id }, name: found.name } : null;
 }
 
-module.exports = { createWhatsAppClient, findGroupByName, listGroups, MessageMedia };
+module.exports = { createWhatsAppClient, findGroupByName, listGroups, resolvePhoneId, MessageMedia };

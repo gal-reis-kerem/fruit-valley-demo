@@ -1,6 +1,6 @@
 const { config } = require('./config');
 const log = require('./logger');
-const { createWhatsAppClient, listGroups } = require('./whatsapp/client');
+const { createWhatsAppClient, listGroups, resolvePhoneId } = require('./whatsapp/client');
 
 // A single failed operation must not kill the whole digital worker (NFR-07)
 process.on('unhandledRejection', (err) => log.error('שגיאה לא מטופלת:', err));
@@ -63,12 +63,14 @@ async function main() {
         const chatId = msg.from; // '<phone>@c.us' private / '<id>@g.us' group
         const isGroup = chatId.endsWith('@g.us');
 
-        // 1) Private message from the configured customer number -> order flow
+        // 1) Private message from the configured customer number -> order flow.
+        // chatId may be an anonymized '@lid' — resolve it to the phone id first.
         if (!isGroup) {
-          if (chatId === config.sourceContactId) {
+          const phoneId = await resolvePhoneId(client, chatId);
+          if (phoneId === config.sourceContactId) {
             await flow.handleCustomerMessage(msg);
           } else {
-            log.info(`הודעה פרטית ממספר לא מוגדר (${chatId}) - מתעלם`);
+            log.info(`הודעה פרטית ממספר לא מוגדר (${chatId}${phoneId !== chatId ? ` = ${phoneId}` : ''}) - מתעלם`);
           }
           return;
         }
