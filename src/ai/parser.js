@@ -130,4 +130,19 @@ ${messageText}
   return JSON.parse(text.text);
 }
 
-module.exports = { parseOrderMessage };
+// Minimal API call to surface key/billing problems at startup instead of on
+// the first live order.
+async function checkApiKey() {
+  try {
+    await client.messages.create({
+      model: config.anthropicModel,
+      max_tokens: 1,
+      messages: [{ role: 'user', content: 'ok' }],
+    });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message || String(err) };
+  }
+}
+
+module.exports = { parseOrderMessage, checkApiKey };

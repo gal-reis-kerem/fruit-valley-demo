@@ -19,6 +19,17 @@ async function main() {
   log.info('מפעיל את הדמו של פירות העמק…');
   log.info(`לקוח: ${config.customerName} | מספר מקור: ${config.sourceContact}`);
 
+  const keyCheck = await require('./ai/parser').checkApiKey();
+  if (keyCheck.ok) {
+    log.info('מפתח Anthropic תקין ✔');
+  } else if (/credit balance is too low/i.test(keyCheck.error)) {
+    log.error('למפתח ה-Anthropic אין יתרת קרדיט - יש לטעון קרדיט ב-console.anthropic.com ← Plans & Billing.');
+    log.warn('האפליקציה תעלה, אבל פרסור הזמנות ייכשל עד שיהיה קרדיט.');
+  } else {
+    log.error('בדיקת מפתח Anthropic נכשלה:', keyCheck.error);
+    log.warn('האפליקציה תעלה, אבל פרסור הזמנות עלול להיכשל.');
+  }
+
   const client = await createWhatsAppClient();
 
   client.on('ready', async () => {
