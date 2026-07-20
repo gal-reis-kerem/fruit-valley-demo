@@ -298,6 +298,29 @@ class Orchestrator {
         order.groupMsgId ? { quotedMessageId: order.groupMsgId } : {},
       );
       store.addHistory(order, 'update_sent_to_group', 'העדכון נשלח כתגובה לקבוצת הליקוט');
+
+      // Backend-only: regenerate the final sheet into the customer folder so
+      // the admin always has the latest full version for invoicing. The
+      // pickers keep working off the printed page + the text update.
+      order.version += 1;
+      order.pdfPath = await generatePickingSheetPDF(order);
+      store.addHistory(order, 'pdf_regenerated', `גרסה ${order.version} הופקה לתיקייה בלבד (השינוי הגיע אחרי ההדפסה)`);
+
+      // Alert the photos group so the manager can reconcile post-print changes
+      const what =
+        added.length && removed.length
+          ? 'נוספו והוסרו פריטים'
+          : removed.length
+            ? 'הוסרו פריטים'
+            : 'נוספו פריטים';
+      const alertChat = this.photosGroup || this.pickingGroup;
+      await sendAndConfirm(
+        this.client,
+        alertChat.id._serialized,
+        `⚠️ שימו לב שבהזמנה *${order.id}* של *${order.customerName}* ${what} אחרי ההדפסה:\n${changesList}`,
+        order.photoRequestMsgId ? { quotedMessageId: order.photoRequestMsgId } : {},
+      );
+      store.addHistory(order, 'postprint_notice_sent', 'הודעת שינוי אחרי הדפסה נשלחה לקבוצת התמונות');
       this.save();
     } else {
       // Regenerate the sheet (new version) and resend

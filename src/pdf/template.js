@@ -105,6 +105,26 @@ function buildPickingSheetHTML(order, opts = {}) {
     idx = section.nextIdx;
   }
 
+  // Five blank rows for hand-written changes after the sheet is printed
+  const manualRows = Array.from({ length: 5 })
+    .map(
+      () => `
+    <tr class="manual">
+      <td class="num"></td>
+      <td class="check"></td>
+      <td class="product"></td>
+      <td class="qty"></td>
+      <td class="unit"></td>
+      <td class="note"></td>
+      <td class="picked"><div class="write-space"></div><div class="unit-options">ק"ג &nbsp;·&nbsp; יחידה &nbsp;·&nbsp; מארז</div></td>
+      <td class="picker-note"></td>
+    </tr>`,
+    )
+    .join('');
+  body += `
+    <tr class="cat-row manual-head"><td colspan="8">✍️ תוספות בכתב יד · เพิ่มเติมด้วยลายมือ</td></tr>
+    ${manualRows}`;
+
   return `<!DOCTYPE html>
 <html dir="rtl" lang="he">
 <head>
@@ -143,6 +163,8 @@ function buildPickingSheetHTML(order, opts = {}) {
   td.picker-note { width: 100px; }
   tr.cat-row td { background: #2e7d32; color: #fff; font-weight: bold; font-size: 14px; padding: 4px 8px; }
   tr.cat-row .vat { font-weight: normal; font-size: 11px; opacity: 0.85; }
+  tr.cat-row.manual-head td { background: #616161; }
+  tr.manual td { height: 30px; }
   .badge { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 8px; color: #fff; vertical-align: middle; }
   .badge.added { background: #d84315; }
   .badge.late { background: #6a1b9a; }
