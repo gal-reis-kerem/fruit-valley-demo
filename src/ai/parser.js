@@ -41,6 +41,7 @@ const ORDER_SCHEMA = {
         type: 'object',
         additionalProperties: false,
         required: [
+          'action',
           'product_he',
           'product_en',
           'product_th',
@@ -52,6 +53,12 @@ const ORDER_SCHEMA = {
           'vat_exempt',
         ],
         properties: {
+          action: {
+            type: 'string',
+            enum: ['add', 'remove'],
+            description:
+              'add: item ordered / added. remove: the customer asks to take this item OFF the order ("תוריד", "בלי", "לבטל את ה...", "להוריד אותם מההזמנה").',
+          },
           product_he: { type: 'string', description: 'Clean product name in Hebrew, without quantity or notes' },
           product_en: { type: 'string', description: 'Product name in English' },
           product_th: { type: 'string', description: 'Product name in Thai' },
@@ -92,7 +99,8 @@ Rules:
 - Translate every product name to English, Thai and Arabic (the pickers are Thai workers and Arabic-speaking supervisors).
 - Categorize each item into its picking area: vegetables / fruits / dairy / other. This ordering also serves invoicing (VAT-exempt items grouped together).
 - vat_exempt = true only for fresh fruits & vegetables.
-- Classification: if the message contains a list of products with no reference to a previous order today, it is new_order. Words like "תוסיפו", "עוד", "שכחתי" indicate addition. "תורידו", "במקום" indicate change. "תבטלו" indicates cancellation. Anything with no order content is general.
+- Classification: if the message contains a list of products with no reference to a previous order today, it is new_order. Words like "תוסיפו", "עוד", "שכחתי" indicate addition. "תורידו", "במקום", "להוריד מההזמנה" indicate change. "תבטלו" (the whole order) indicates cancellation. Anything with no order content is general.
+- Item action: mark items the customer wants REMOVED from the order with action="remove" (e.g. "יכול להוריד את הענבים?" -> item ענבים with action="remove", quantity null). Everything else is action="add". Removing specific items is a change, NOT a cancellation.
 - delivery_date: resolve relative dates ("מחר", "ליום ראשון") to an absolute date. Default: tomorrow (orders are normally for the next day).
 - Keep item order stable within each category (as written by the customer).
 - reply_text: write the WhatsApp reply we send back to the customer. Sound like a friendly human coordinator, in casual Hebrew, 1-2 short sentences, at most one emoji. Include the token {{ORDER}} exactly once (it is replaced with the order number). Examples of tone (do NOT copy verbatim, invent your own variation each time): "קיבלתי 🙌 ההזמנה יצאה לליקוט, מספר הזמנה {{ORDER}}", "מעולה, הכל נקלט! ההזמנה שלך ({{ORDER}}) כבר אצל המלקטים". For additions: acknowledge the addition and mention it joined order {{ORDER}}. Mirror the customer's energy (if they are brief - be brief).`;

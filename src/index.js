@@ -105,6 +105,25 @@ async function launchClient(attempt) {
     state.state = 'connected';
     log.info('ממתין להזמנות… 🍎');
 
+    // Liveness monitor: WhatsApp Web occasionally reloads its page silently
+    // (e.g. a version nudge). The process keeps running but every listener is
+    // gone — messages stop arriving with no error. Detect the dead page and
+    // relaunch automatically.
+    const liveness = setInterval(async () => {
+      if (!state.running || state.client !== client) {
+        clearInterval(liveness);
+        return;
+      }
+      const alive = await client.pupPage
+        .evaluate(() => typeof window.WWebJS !== 'undefined')
+        .catch(() => false);
+      if (!alive) {
+        clearInterval(liveness);
+        log.warn('הדף של וואטסאפ התרענן ואיבד את ההאזנות - מתחבר מחדש אוטומטית…');
+        relaunch('הדף התרענן');
+      }
+    }, 60000);
+
     // Incoming messages. Everything is derived from msg.from directly —
     // msg.getChat() goes through wwebjs's chat serializer, which is broken on
     // current WhatsApp Web versions.

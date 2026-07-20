@@ -149,46 +149,69 @@ class Orchestrator {
     return this.applyAddition(msg, order, parsed, rawBody);
   }
 
-  // FR-09: attach an addition/merged message to the order and record whether
-  // it arrived before or after the sheet was printed.
+  // FR-09: apply an addition/change (including item removals) to the order
+  // and record whether it arrived before or after picking started.
   async applyAddition(msg, order, parsed, rawBody) {
-    const printed = ['picking', 'awaiting_photos'].includes(order.status);
+    const printed = Boolean(order.reaction); // a reaction means the sheet is printed
     const late = this.isAfterCutoff();
-    for (const item of parsed.items) {
+
+    const added = parsed.items.filter((it) => it.action !== 'remove');
+    const removals = parsed.items.filter((it) => it.action === 'remove');
+
+    for (const item of added) {
       order.items.push({ ...item, addedAfterPrint: printed, addedLate: !printed && late });
     }
+
+    // Remove items by (normalized) Hebrew-name match
+    const removed = [];
+    const notFound = [];
+    for (const rem of removals) {
+      const needle = rem.product_he.trim();
+      const idx = order.items.findIndex(
+        (it) => it.product_he.includes(needle) || needle.includes(it.product_he),
+      );
+      if (idx >= 0) removed.push(...order.items.splice(idx, 1));
+      else notFound.push(needle);
+    }
+
     if (parsed.customer_note) {
       order.customerNote = order.customerNote ? `${order.customerNote} | ${parsed.customer_note}` : parsed.customer_note;
     }
     order.rawMessages.push(rawBody);
     store.addHistory(
       order,
-      'addition_received',
-      `${parsed.items.length} פריטים (${printed ? 'אחרי הדפסה' : late ? 'אחרי שעת הסגירה' : 'לפני הדפסה'})`,
+      'order_updated',
+      `+${added.length} פריטים, -${removed.length} הוסרו${notFound.length ? ` (לא נמצאו: ${notFound.join(', ')})` : ''}` +
+        ` (${printed ? 'אחרי תחילת ליקוט' : late ? 'אחרי שעת הסגירה' : 'לפני הדפסה'})`,
     );
 
-    const itemsList = parsed.items
-      .map((it) => `• ${it.product_he}${it.quantity ? ` - ${it.quantity} ${it.unit}` : ''}${it.note ? ` (${it.note})` : ''}`)
-      .join('\n');
+    const fmt = (it) => `• ${it.product_he}${it.quantity ? ` - ${it.quantity} ${it.unit}` : ''}${it.note ? ` (${it.note})` : ''}`;
+    const changesList = [
+      ...added.map((it) => `➕ ${fmt(it).slice(2)}`),
+      ...removed.map((it) => `➖ ${it.product_he}`),
+    ].join('\n');
 
     await this.safeReply(
       msg,
       this.customerText(parsed, order, printed ? replies.additionAfterPrint(order) : replies.addition(order)),
     );
+    if (notFound.length) {
+      await this.safeReply(msg, `לא מצאתי בהזמנה את: ${notFound.join(', ')} - אפשר לבדוק את הניסוח? 🙏`);
+    }
 
     if (printed) {
-      // Sheet already printed: reply to the PDF message in the picking group
-      // (mirrors the real-world "reply to the PDF" practice).
+      // Picking already started: don't resend the sheet - update the pickers
+      // as a reply to the PDF message (mirrors the real-world practice).
       await sendAndConfirm(
         this.client,
         this.pickingGroup.id._serialized,
-        `➕ *תוספת להזמנה ${order.id}* (${order.customerName}):\n${itemsList}`,
+        `✏️ *עדכון להזמנה ${order.id}* (${order.customerName}):\n${changesList}`,
         order.groupMsgId ? { quotedMessageId: order.groupMsgId } : {},
       );
-      store.addHistory(order, 'addition_sent_to_group', 'התוספת נשלחה כתגובה לקבוצת הליקוט');
+      store.addHistory(order, 'update_sent_to_group', 'העדכון נשלח כתגובה לקבוצת הליקוט');
       this.save();
     } else {
-      // Not printed yet: regenerate the sheet (new version) and resend
+      // Regenerate the sheet (new version) and resend
       order.version += 1;
       this.save();
       await this.sendPickingSheet(order, { updated: true });
@@ -241,6 +264,45 @@ class Orchestrator {
     store.addHistory(order, 'pdf_sent_to_group', `גרסה ${order.version} נשלחה לקבוצה "${this.pickingGroup.name}"`);
     this.save();
     log.info(`דף ליקוט ${order.id} v${order.version} נשלח לקבוצת הליקוט`);
+
+    // The photos-group side runs in lockstep with every PDF, so no shipment
+    // falls between the chairs: first send opens the photo thread, updates
+    // announce the latest sheet version.
+    if (!order.photoRequestMsgId) {
+      await this.sendPhotoRequest(order);
+    } else {
+      const noticeChat = this.photosGroup || this.pickingGroup;
+      await sendAndConfirm(
+        this.client,
+        noticeChat.id._serialized,
+        `⚠️ שימו לב שבמשלוח של *${order.customerName}* הגרסה העדכנית ביותר היא גרסה *${order.version}*`,
+        order.photoRequestMsgId ? { quotedMessageId: order.photoRequestMsgId } : {},
+      );
+      store.addHistory(order, 'version_notice_sent', `הודעת גרסה ${order.version} נשלחה לקבוצת התמונות`);
+      this.save();
+    }
+  }
+
+  // FR-12: photo request, attributed to the order - sent together with the
+  // first picking sheet.
+  async sendPhotoRequest(order) {
+    const requestText =
+      `📸 אנא השב להודעה זו עבור ההזמנה של:\n` +
+      `*${order.customerName}*\n` +
+      `מספר הזמנה\n` +
+      `*${order.id}*\n\n` +
+      `1. תמונה של דף הליקוט\n` +
+      `2. תמונה של המשלוח המוכן`;
+
+    const targetChat = this.photosGroup || this.pickingGroup;
+    const opts = !this.photosGroup && order.groupMsgId ? { quotedMessageId: order.groupMsgId } : {};
+    const requestMsgId = await sendAndConfirm(this.client, targetChat.id._serialized, requestText, opts);
+
+    order.photoRequestMsgId = requestMsgId; // null is fine — photos attach via fallback
+    order.status = 'awaiting_photos';
+    store.addHistory(order, 'photo_request_sent', `נשלחה לקבוצה "${targetChat.name}"`);
+    this.save();
+    log.info(`הזמנה ${order.id}: בקשת תמונות נשלחה לקבוצת התמונות`);
   }
 
   // ---------- Step 6-7: emoji reaction -> photo request ----------
@@ -269,46 +331,22 @@ class Orchestrator {
     if (!order && inPickingGroup) {
       order =
         this.db.orders
-          .filter((o) => o.status === 'sent_to_group')
+          .filter((o) => ['sent_to_group', 'awaiting_photos'].includes(o.status) && !o.reaction)
           .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] || null;
       if (order && !order.groupMsgId) {
         order.groupMsgId = msgId;
         store.addHistory(order, 'group_msg_adopted', 'מזהה הודעת ה-PDF אומץ מהריאקשן');
       }
     }
-    if (!order || order.status !== 'sent_to_group') return;
+    if (!order || !['sent_to_group', 'awaiting_photos'].includes(order.status)) return;
+    if (order.reaction) return; // picking start already recorded
 
-    order.status = 'picking';
+    // The photo request already went out with the PDF — the reaction just
+    // records that the sheet was printed and picking started (FR-11).
     order.reaction = { emoji: reaction.reaction, by: reaction.senderId, at: new Date().toISOString() };
     store.addHistory(order, 'picking_started', `ריאקשן ${reaction.reaction} - הדף הודפס והליקוט החל`);
     this.save();
     log.info(`הזמנה ${order.id}: זוהה ריאקשן ${reaction.reaction} - הליקוט החל`);
-
-    // One photo request per order — a reaction on an updated sheet (v2+) must
-    // not create a second request.
-    if (order.photoRequestMsgId) {
-      order.status = 'awaiting_photos';
-      this.save();
-      return;
-    }
-
-    // FR-12: photo request attributed to the order
-    const requestText =
-      `📸 אנא השב להודעה זו עבור ההזמנה של:\n` +
-      `*${order.customerName}*\n` +
-      `מספר הזמנה\n` +
-      `*${order.id}*\n\n` +
-      `1. תמונה של דף הליקוט\n` +
-      `2. תמונה של המשלוח המוכן`;
-
-    const targetChat = this.photosGroup || this.pickingGroup;
-    const opts = !this.photosGroup && order.groupMsgId ? { quotedMessageId: order.groupMsgId } : {};
-    const requestMsgId = await sendAndConfirm(this.client, targetChat.id._serialized, requestText, opts);
-
-    order.photoRequestMsgId = requestMsgId; // null is fine — photos attach via fallback
-    order.status = 'awaiting_photos';
-    store.addHistory(order, 'photo_request_sent', `נשלחה לקבוצה "${targetChat.name}"`);
-    this.save();
   }
 
   // ---------- Step 8: photos -> attached to the order ----------
