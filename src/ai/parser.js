@@ -8,8 +8,16 @@ const client = new Anthropic();
 const ORDER_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['classification', 'delivery_date', 'customer_note', 'location_detail', 'reply_text', 'items'],
+  required: ['classification', 'company', 'delivery_date', 'customer_note', 'location_detail', 'reply_text', 'items'],
   properties: {
+    company: {
+      anyOf: [
+        { type: 'string', enum: config.companies.map((c) => c.name) },
+        { type: 'null' },
+      ],
+      description:
+        'The company this order belongs to, EXACTLY as listed. The rep orders for several companies — detect from phrases like "הזמנה לטריפל", "עבור כרם קפיטל", or a company name anywhere in the message (any spelling/Hebrew/English variation maps to the listed name). null if the message does not indicate a company.',
+    },
     reply_text: {
       type: 'string',
       description:
@@ -103,7 +111,8 @@ Rules:
 - Item action: mark items the customer wants REMOVED from the order with action="remove" (e.g. "יכול להוריד את הענבים?" -> item ענבים with action="remove", quantity null). Everything else is action="add". Removing specific items is a change, NOT a cancellation.
 - delivery_date: resolve relative dates ("מחר", "ליום ראשון") to an absolute date. Default: tomorrow (orders are normally for the next day).
 - Keep item order stable within each category (as written by the customer).
-- reply_text: write the WhatsApp reply we send back to the customer. Sound like a friendly human coordinator, in casual Hebrew, 1-2 short sentences, at most one emoji. Include the token {{ORDER}} exactly once (it is replaced with the order number). Examples of tone (do NOT copy verbatim, invent your own variation each time): "קיבלתי 🙌 ההזמנה יצאה לליקוט, מספר הזמנה {{ORDER}}", "מעולה, הכל נקלט! ההזמנה שלך ({{ORDER}}) כבר אצל המלקטים". For additions: acknowledge the addition and mention it joined order {{ORDER}}. Mirror the customer's energy (if they are brief - be brief).`;
+- reply_text: write the WhatsApp reply we send back to the customer. Sound like a friendly human coordinator, in casual Hebrew, 1-2 short sentences, at most one emoji. Include the token {{ORDER}} exactly once (it is replaced with the order number). Examples of tone (do NOT copy verbatim, invent your own variation each time): "קיבלתי 🙌 ההזמנה יצאה לליקוט, מספר הזמנה {{ORDER}}", "מעולה, הכל נקלט! ההזמנה שלך ({{ORDER}}) כבר אצל המלקטים". For additions: acknowledge the addition and mention it joined order {{ORDER}}. Mirror the customer's energy (if they are brief - be brief).
+- EXCEPTION - company is null on an order/addition/change: reply_text must instead ASK naturally which company the order is for, listing the options, WITHOUT the {{ORDER}} token (e.g. "קיבלתי! רק לאיזו חברה ההזמנה - כרם קפיטל, טריפל או סולראדג'?").`;
 
 /**
  * Parse a raw WhatsApp message into a structured order.
@@ -131,7 +140,7 @@ async function parseOrderMessage(messageText, now = new Date()) {
     messages: [
       {
         role: 'user',
-        content: `Today is ${dayName}, ${todayStr} (Israel time). Customer: ${config.customerName}.
+        content: `Today is ${dayName}, ${todayStr} (Israel time). The sender is a representative who orders on behalf of these companies: ${config.companies.map((c) => c.name).join(' / ')}.
 
 WhatsApp message received:
 """

@@ -210,7 +210,7 @@ async function main() {
   }
 
   log.info('מפעיל את הדמו של פירות העמק…');
-  log.info(`לקוח: ${config.customerName} | מספר מקור: ${config.sourceContact}`);
+  log.info(`נציג: ${config.sourceContact} | חברות: ${config.companies.map((c) => c.name).join(' / ')}`);
 
   const keyCheck = await require('./ai/parser').checkApiKey();
   if (keyCheck.ok) {

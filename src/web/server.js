@@ -47,7 +47,7 @@ function page() {
       <button id="toggle" class="stop" onclick="toggle()">…</button>
       <a class="btn support" href="${mailto}">📧 דיווח תקלה</a>
     </div>
-    <div class="meta">לקוח: ${config.customerName} · מספר מקור: ${config.sourceContact}</div>
+    <div class="meta">נציג: ${config.sourceContact} · חברות: ${config.companies.map((c) => c.name).join(' / ')}</div>
   </div>
 <script>
 let running = true;
@@ -129,6 +129,14 @@ function startWebServer(controller) {
     }
   });
 
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      log.error(`נראה שהאפליקציה כבר רצה (פורט ${config.webPort} תפוס).`);
+      log.info('עצור את ההרצה הקודמת (Ctrl+C בטרמינל שלה) והפעל שוב, או בדוק את http://localhost:' + config.webPort);
+      process.exit(1);
+    }
+    log.error('שגיאת שרת ווב:', err.message);
+  });
   server.listen(config.webPort, () => {
     log.info(`מסך בקרה: http://localhost:${config.webPort}`);
   });

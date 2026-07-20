@@ -25,6 +25,35 @@ class Orchestrator {
     this.pickingGroup = pickingGroup; // Chat object
     this.photosGroup = photosGroup;   // Chat object or null
     this.db = store.loadDB();
+    // A parsed order waiting for the rep to answer "which company?"
+    this.pending = null; // { parsed, rawBody, at }
+  }
+
+  // ---------- company resolution (the rep orders for several companies) ----
+  findCompany(name) {
+    if (!name) return null;
+    const n = String(name).trim().toLowerCase();
+    return (
+      config.companies.find(
+        (c) => c.name.toLowerCase() === n || c.nameEn.toLowerCase() === n,
+      ) || null
+    );
+  }
+
+  matchCompanyByText(text) {
+    const t = String(text || '').toLowerCase();
+    return (
+      config.companies.find(
+        (c) =>
+          t.includes(c.name.toLowerCase()) ||
+          t.includes(c.nameEn.toLowerCase()) ||
+          (c.aliases || []).some((a) => t.includes(a.toLowerCase())),
+      ) || null
+    );
+  }
+
+  companyOptions() {
+    return config.companies.map((c) => c.name).join(' / ');
   }
 
   save() {
@@ -59,12 +88,15 @@ class Orchestrator {
   // ---------- Step 1-5: incoming customer message ----------
   async handleCustomerMessage(msg) {
     const body = (msg.body || '').trim();
-    log.info(`הודעה מ-${config.customerName}: "${body.slice(0, 80)}${body.length > 80 ? '…' : ''}"`);
+    log.info(`הודעה מהנציג: "${body.slice(0, 80)}${body.length > 80 ? '…' : ''}"`);
 
     if (!body && msg.hasMedia) {
       // A bare image from the customer (e.g. photo of a specific product) —
-      // attach it to the open order if there is one.
-      const open = store.findOpenOrder(this.db, config.customerName);
+      // attach it to the most recent open order across all companies.
+      const open = config.companies
+        .map((c) => store.findOpenOrder(this.db, c.name))
+        .filter(Boolean)
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
       if (open) {
         await this.saveMediaToOrder(msg, open, 'customer-image');
         store.addHistory(open, 'customer_image_attached', 'תמונה מהלקוח צורפה להזמנה');
@@ -75,6 +107,20 @@ class Orchestrator {
     }
     if (!body) return;
 
+    // Is this the answer to a pending "which company?" question?
+    if (this.pending) {
+      const company = this.matchCompanyByText(body);
+      if (company) {
+        const { parsed, rawBody } = this.pending;
+        this.pending = null;
+        log.info(`החברה זוהתה מהתשובה: ${company.name}`);
+        return this.dispatchParsed(msg, parsed, rawBody, company);
+      }
+      // Not a company answer — drop the pending draft and process normally
+      log.info('התקבלה הודעה שאינה תשובת חברה - הטיוטה הממתינה נמחקת');
+      this.pending = null;
+    }
+
     let parsed;
     try {
       parsed = await parseOrderMessage(body);
@@ -84,16 +130,50 @@ class Orchestrator {
       return;
     }
 
-    log.info(`סיווג: ${parsed.classification}, פריטים: ${parsed.items.length}`);
+    log.info(`סיווג: ${parsed.classification}, פריטים: ${parsed.items.length}, חברה: ${parsed.company || 'לא צוינה'}`);
 
+    if (parsed.classification === 'general') {
+      return this.safeReply(msg, this.customerText(parsed, null, replies.general()));
+    }
+
+    // Attribute the order to a company (FR-04). The rep serves several
+    // companies — if none was named, ask and hold the draft.
+    const company = this.findCompany(parsed.company) || this.matchCompanyByText(parsed.company || '');
+    if (!company) {
+      // An addition/change/cancellation with exactly one open order overall
+      // attaches to it without nagging the rep.
+      if (['addition', 'change', 'cancellation'].includes(parsed.classification)) {
+        const opens = config.companies
+          .map((c) => store.findOpenOrder(this.db, c.name))
+          .filter(Boolean);
+        if (opens.length === 1) {
+          const only = this.findCompany(opens[0].customerName);
+          if (only) {
+            log.info(`אין ציון חברה אבל יש הזמנה פתוחה יחידה (${opens[0].id}) - משייך אליה`);
+            return this.dispatchParsed(msg, parsed, body, only);
+          }
+        }
+      }
+      this.pending = { parsed, rawBody: body, at: Date.now() };
+      const question =
+        parsed.reply_text && !parsed.reply_text.includes('{{ORDER}}')
+          ? parsed.reply_text
+          : `קיבלתי! לאיזו חברה ההזמנה - ${this.companyOptions()}? 🙏`;
+      return this.safeReply(msg, question);
+    }
+
+    return this.dispatchParsed(msg, parsed, body, company);
+  }
+
+  dispatchParsed(msg, parsed, rawBody, company) {
     switch (parsed.classification) {
       case 'new_order':
-        return this.handleNewOrder(msg, parsed, body);
+        return this.handleNewOrder(msg, parsed, rawBody, company);
       case 'addition':
       case 'change':
-        return this.handleAddition(msg, parsed, body);
+        return this.handleAddition(msg, parsed, rawBody, company);
       case 'cancellation':
-        return this.handleCancellation(msg, parsed);
+        return this.handleCancellation(msg, parsed, company);
       default:
         return this.safeReply(msg, this.customerText(parsed, null, replies.general()));
     }
@@ -110,22 +190,23 @@ class Orchestrator {
     return t.split('{{ORDER}}').join(order.id);
   }
 
-  async handleNewOrder(msg, parsed, rawBody) {
+  async handleNewOrder(msg, parsed, rawBody, company) {
     const deliveryDate =
       parsed.delivery_date || new Date(Date.now() + 24 * 3600 * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' });
 
-    // One board per customer per delivery date: a second "new order" message
+    // One board per company per delivery date: a second "new order" message
     // for the same date merges into the existing open order.
-    const existing = store.findOpenOrderForDate(this.db, config.customerName, deliveryDate);
+    const existing = store.findOpenOrderForDate(this.db, company.name, deliveryDate);
     if (existing) {
-      log.info(`כבר קיימת הזמנה פתוחה ל-${deliveryDate} (${existing.id}) - ההודעה מתמזגת לתוכה`);
+      log.info(`כבר קיימת הזמנה פתוחה של ${company.name} ל-${deliveryDate} (${existing.id}) - ההודעה מתמזגת לתוכה`);
       return this.applyAddition(msg, existing, parsed, rawBody);
     }
 
     const order = store.createOrder(this.db, {
       deliveryDate,
-      customerName: config.customerName,
-      customerNameEn: config.customerNameEn,
+      customerName: company.name,
+      customerNameEn: company.nameEn,
+      initials: company.initials,
       customerNote: parsed.customer_note,
       locationDetail: parsed.location_detail,
       items: parsed.items,
@@ -139,12 +220,12 @@ class Orchestrator {
     await this.sendPickingSheet(order);
   }
 
-  async handleAddition(msg, parsed, rawBody) {
-    const order = store.findOpenOrder(this.db, config.customerName);
+  async handleAddition(msg, parsed, rawBody, company) {
+    const order = store.findOpenOrder(this.db, company.name);
     if (!order) {
-      // No open order — treat the addition as a new order
-      log.info('אין הזמנה פתוחה - התוספת נפתחת כהזמנה חדשה');
-      return this.handleNewOrder(msg, parsed, rawBody);
+      // No open order for this company — treat the addition as a new order
+      log.info(`אין הזמנה פתוחה ל-${company.name} - התוספת נפתחת כהזמנה חדשה`);
+      return this.handleNewOrder(msg, parsed, rawBody, company);
     }
     return this.applyAddition(msg, order, parsed, rawBody);
   }
@@ -218,8 +299,8 @@ class Orchestrator {
     }
   }
 
-  async handleCancellation(msg, parsed) {
-    const order = store.findOpenOrder(this.db, config.customerName);
+  async handleCancellation(msg, parsed, company) {
+    const order = store.findOpenOrder(this.db, company.name);
     if (!order) {
       return this.safeReply(msg, 'לא נמצאה הזמנה פתוחה לביטול.');
     }

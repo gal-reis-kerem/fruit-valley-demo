@@ -27,7 +27,7 @@ function saveDB(db) {
 // One flat folder per customer: output/<Customer Name>/, PDFs and photos
 // side by side (no per-order subfolders).
 function customerDir(order) {
-  const dir = path.join(config.outputDir, order.customerNameEn || config.customerNameEn);
+  const dir = path.join(config.outputDir, order.customerNameEn);
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -36,7 +36,7 @@ function customerDir(order) {
 // <detail> is an optional per-order qualifier (floor/building, e.g. "f2").
 function orderFileBase(order) {
   const [y, m, d] = order.deliveryDate.split('-');
-  const parts = [(order.customerNameEn || config.customerNameEn).replace(/\s+/g, '-')];
+  const parts = [order.customerNameEn.replace(/\s+/g, '-')];
   if (order.locationDetail) parts.push(String(order.locationDetail).replace(/\s+/g, '-'));
   parts.push(`${d}${m}${y}`);
   const seqSuffix = order.id && order.id.match(/-(\d+)$/u);
@@ -51,9 +51,9 @@ function orderFileBase(order) {
 // PDF file version (Vx) advances with each sheet update. In the rare case a
 // second separate order is opened for a date whose board was already closed,
 // a -2/-3 suffix is added.
-function nextOrderId(db, deliveryDate) {
+function nextOrderId(db, deliveryDate, initials) {
   const [y, m, d] = deliveryDate.split('-');
-  const base = `${config.customerInitials}-${d}${m}${y}`;
+  const base = `${initials}-${d}${m}${y}`;
   let id = base;
   let seq = 1;
   while (db.orders.some((o) => o.id === id)) {
@@ -81,11 +81,11 @@ function addHistory(order, action, detail) {
  *   documented      -> both photos received
  *   cancelled
  */
-function createOrder(db, { deliveryDate, customerName, customerNameEn, customerNote, locationDetail, items, rawMessage }) {
+function createOrder(db, { deliveryDate, customerName, customerNameEn, initials, customerNote, locationDetail, items, rawMessage }) {
   const order = {
-    id: nextOrderId(db, deliveryDate),
+    id: nextOrderId(db, deliveryDate, initials),
     customerName,
-    customerNameEn: customerNameEn || config.customerNameEn,
+    customerNameEn,
     locationDetail: locationDetail || null,
     deliveryDate,
     customerNote: customerNote || null,

@@ -15,14 +15,16 @@ const config = {
   anthropicModel: process.env.ANTHROPIC_MODEL || 'claude-opus-4-8',
   sourceContact: normalizePhone(process.env.SOURCE_CONTACT_NUMBER || '0557118125'),
   sourceContactId: normalizePhone(process.env.SOURCE_CONTACT_NUMBER || '0557118125') + '@c.us',
-  customerName: process.env.CUSTOMER_NAME || 'כרם קפיטל',
-  // Latin name used for the customer folder and PDF file names
-  customerNameEn: process.env.CUSTOMER_NAME_EN || 'Kerem Capital',
-  // "Kerem Capital" -> "KC"; prefix of the unified order number (KC-<ddmmyyyy>)
-  customerInitials: (process.env.CUSTOMER_NAME_EN || 'Kerem Capital')
-    .split(/\s+/)
-    .map((w) => w[0].toUpperCase())
-    .join(''),
+  // The source contact is a REPRESENTATIVE who orders on behalf of several
+  // companies. Each order is attributed to one of them (folders, file names,
+  // order numbers and group messages). Override via COMPANIES env (JSON).
+  companies: process.env.COMPANIES
+    ? JSON.parse(process.env.COMPANIES)
+    : [
+        { name: 'כרם קפיטל', nameEn: 'Kerem Capital', initials: 'KC', aliases: ['כרם', 'קפיטל', 'kerem', 'capital'] },
+        { name: 'טריפל', nameEn: 'Triple', initials: 'TR', aliases: ['triple', 'טריפל'] },
+        { name: "סולראדג'", nameEn: 'SolarEdge', initials: 'SE', aliases: ['סולראדג', 'סולר אדג', 'סולאראדג', 'solaredge', 'solar edge'] },
+      ],
   webPort: Number(process.env.WEB_PORT || 3010),
   pickingGroupName: process.env.PICKING_GROUP_NAME || '',
   photosGroupName: process.env.PHOTOS_GROUP_NAME || '',
