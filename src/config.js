@@ -23,7 +23,7 @@ const config = {
     : [
         { name: 'כרם קפיטל', nameEn: 'Kerem Capital', initials: 'KC', aliases: ['כרם', 'קפיטל', 'kerem', 'capital'] },
         { name: 'טריפל', nameEn: 'Triple', initials: 'TR', aliases: ['triple', 'טריפל'] },
-        { name: "סולראדג'", nameEn: 'SolarEdge', initials: 'SE', aliases: ['סולראדג', 'סולר אדג', 'סולאראדג', 'solaredge', 'solar edge'] },
+        { name: "סולראדג'", nameEn: 'Solar-edge', initials: 'SE', aliases: ['סולראדג', 'סולר אדג', 'סולאראדג', 'solaredge', 'solar edge', 'solar-edge'] },
       ],
   webPort: Number(process.env.WEB_PORT || 3010),
   pickingGroupName: process.env.PICKING_GROUP_NAME || '',

@@ -60,6 +60,13 @@ class Orchestrator {
     store.saveDB(this.db);
   }
 
+  // Re-read the DB from disk at every entry point, so external cleanup or
+  // edits (e.g. wiping orders.json) take effect immediately — the in-memory
+  // copy must never resurrect deleted data.
+  reload() {
+    this.db = store.loadDB();
+  }
+
   // msg.reply quotes the original message; on broken WhatsApp Web versions the
   // quoting path can fail, so fall back to a plain send to the same chat.
   async safeReply(msg, text) {
@@ -87,6 +94,7 @@ class Orchestrator {
 
   // ---------- Step 1-5: incoming customer message ----------
   async handleCustomerMessage(msg) {
+    this.reload();
     const body = (msg.body || '').trim();
     log.info(`הודעה מהנציג: "${body.slice(0, 80)}${body.length > 80 ? '…' : ''}"`);
 
@@ -390,6 +398,7 @@ class Orchestrator {
   // `reaction` comes either from wwebjs (msgId is a key object) or from our
   // own page hook (msgId is already a serialized string).
   async handleReaction(reaction) {
+    this.reload();
     if (!reaction.reaction) return; // reaction removed
     const rawKey = reaction.msgId;
     const msgId =
@@ -432,6 +441,7 @@ class Orchestrator {
 
   // ---------- Step 8: photos -> attached to the order ----------
   async handleGroupMedia(msg) {
+    this.reload();
     if (!msg.hasMedia) return;
 
     // Prefer explicit attribution: a reply to the photo request / PDF message.
