@@ -5,7 +5,7 @@ const log = require('../logger');
 const { parseOrderMessage } = require('../ai/parser');
 const store = require('../orders/store');
 const { generatePickingSheetPDF } = require('../pdf/generator');
-const { MessageMedia, sendAndConfirm } = require('../whatsapp/client');
+const { MessageMedia, sendAndConfirm, resolvePhoneId } = require('../whatsapp/client');
 const replies = require('./replies');
 
 /**
@@ -244,16 +244,29 @@ class Orchestrator {
   }
 
   // ---------- Step 6-7: emoji reaction -> photo request ----------
+  // `reaction` comes either from wwebjs (msgId is a key object) or from our
+  // own page hook (msgId is already a serialized string).
   async handleReaction(reaction) {
     if (!reaction.reaction) return; // reaction removed
-    const msgId = reaction.msgId && reaction.msgId._serialized;
-    if (!msgId) return;
+    const rawKey = reaction.msgId;
+    const msgId =
+      typeof rawKey === 'string'
+        ? rawKey
+        : rawKey && (rawKey._serialized || rawKey.$1 || null);
 
-    let order = store.findByGroupMsgId(this.db, msgId);
-    // Fallback: the PDF's message id may be unknown (send confirmation failed).
+    // A reaction from the customer (e.g. on the ack) must not start picking
+    const senderId = typeof reaction.senderId === 'string' ? reaction.senderId : null;
+    if (senderId) {
+      const senderPhone = await resolvePhoneId(this.client, senderId).catch(() => senderId);
+      if (senderPhone === config.sourceContactId) return;
+    }
+
+    let order = msgId ? store.findByGroupMsgId(this.db, msgId) : null;
+    // Fallback: the PDF's message id may be unknown or serialized differently.
     // If the reaction happened in the picking group, adopt the most recent
     // order that is waiting for one.
-    if (!order && msgId.includes(this.pickingGroup.id._serialized)) {
+    const inPickingGroup = msgId && msgId.includes(this.pickingGroup.id._serialized);
+    if (!order && inPickingGroup) {
       order =
         this.db.orders
           .filter((o) => o.status === 'sent_to_group')
@@ -281,8 +294,12 @@ class Orchestrator {
 
     // FR-12: photo request attributed to the order
     const requestText =
-      `📸 הזמנה מספר *${order.id}* לחברת *${order.customerName}*:\n` +
-      `נא להגיב על ההודעה הזו לאחר סיום הליקוט עם תמונת המשלוח הארוז ותמונת דף הליקוט.`;
+      `📸 אנא השב להודעה זו עבור ההזמנה של:\n` +
+      `*${order.customerName}*\n` +
+      `מספר הזמנה\n` +
+      `*${order.id}*\n\n` +
+      `1. תמונה של דף הליקוט\n` +
+      `2. תמונה של המשלוח המוכן`;
 
     const targetChat = this.photosGroup || this.pickingGroup;
     const opts = !this.photosGroup && order.groupMsgId ? { quotedMessageId: order.groupMsgId } : {};

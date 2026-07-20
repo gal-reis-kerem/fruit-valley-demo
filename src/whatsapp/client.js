@@ -34,6 +34,33 @@ async function createWhatsAppClient() {
   client.on('auth_failure', (msg) => log.error('וואטסאפ: כשל אימות', msg));
   client.on('disconnected', (reason) => log.warn('וואטסאפ: נותק -', reason));
 
+  // WhatsApp sometimes shows a promo modal ("What's new on WhatsApp Web…")
+  // that covers the app and blocks wwebjs's ready detection forever. Poll for
+  // blocking dialogs during startup and click their confirm button.
+  const dismisser = setInterval(async () => {
+    try {
+      if (!client.pupPage) return;
+      const clicked = await client.pupPage.evaluate(() => {
+        const dialogs = document.querySelectorAll('[data-animate-modal-popup="true"], [role="dialog"]');
+        for (const dialog of dialogs) {
+          const buttons = [...dialog.querySelectorAll('button, div[role="button"]')];
+          const target = buttons.find((b) =>
+            /^(Continue|המשך|OK|אישור|Got it|הבנתי|Close|סגור)$/i.test((b.textContent || '').trim()),
+          );
+          if (target) {
+            target.click();
+            return (target.textContent || '').trim();
+          }
+        }
+        return null;
+      });
+      if (clicked) log.info(`נסגר דיאלוג חוסם של וואטסאפ ("${clicked}")`);
+    } catch (err) { /* page not up yet - keep polling */ }
+  }, 4000);
+  // keep a short grace period after ready (the dialog can pop late)
+  client.on('ready', () => setTimeout(() => clearInterval(dismisser), 45000));
+  client.on('disconnected', () => clearInterval(dismisser));
+
   return client;
 }
 
@@ -128,6 +155,46 @@ async function findGroupByName(client, name, opts) {
   return found ? { id: { _serialized: found.id }, name: found.name } : null;
 }
 
+// wwebjs's own reaction listener fails to install on current WhatsApp Web
+// (its injection chain breaks earlier, so message_reaction never fires).
+// Install our own hook directly on the reactions table: every upsert is
+// forwarded to the callback with plain-string keys (handles the _serialized
+// -> $1 rename too). Call after 'ready'; safe to call again after relaunch.
+async function installReactionHook(client, onReactions) {
+  try {
+    await client.pupPage.exposeFunction('onTripleReaction', (events) => {
+      try {
+        onReactions(events || []);
+      } catch (err) {
+        log.error('טיפול בריאקשן נכשל:', err.message);
+      }
+    });
+  } catch (err) {
+    // already exposed on this page - fine
+  }
+  await client.pupPage.evaluate(() => {
+    const mod = window.require('WAWebAddonReactionTableMode');
+    const target = mod.reactionTableMode;
+    if (!target || target.__tripleHooked) return;
+    const orig = target.bulkUpsert.bind(target);
+    target.bulkUpsert = (...args) => {
+      try {
+        const items = Array.isArray(args[0]) ? args[0] : [];
+        window.onTripleReaction(
+          items.map((r) => ({
+            emoji: r.reactionText ?? r.text ?? r.reaction ?? '',
+            parentKey: r.reactionParentKey ? String(r.reactionParentKey) : null,
+            sender: (r.author || r.from) ? String(r.author || r.from) : null,
+          })),
+        );
+      } catch (e) { /* never break WhatsApp itself */ }
+      return orig(...args);
+    };
+    target.__tripleHooked = true;
+  });
+  log.info('הוק ריאקשנים הותקן ✔');
+}
+
 // On the pinned WhatsApp Web version, client.sendMessage often DELIVERS the
 // message but resolves to undefined (the response serializer is broken).
 // Send, then recover the real message id from the chat's own message log so
@@ -150,7 +217,15 @@ async function sendAndConfirm(client, chatId, content, options = {}) {
       if (!chat) return null;
       const msgs = chat.msgs.getModelsArray();
       for (let i = msgs.length - 1; i >= 0; i--) {
-        if (msgs[i].id && msgs[i].id.fromMe) return msgs[i].id._serialized;
+        const k = msgs[i].id;
+        if (k && k.fromMe) {
+          // recent WhatsApp Web builds renamed _serialized — reconstruct manually
+          return (
+            k._serialized ||
+            k.$1 ||
+            [k.fromMe, k.remote && (k.remote._serialized || String(k.remote)), k.id].join('_')
+          );
+        }
       }
       return null;
     }, chatId);
@@ -164,4 +239,12 @@ async function sendAndConfirm(client, chatId, content, options = {}) {
   return null;
 }
 
-module.exports = { createWhatsAppClient, findGroupByName, listGroups, resolvePhoneId, sendAndConfirm, MessageMedia };
+module.exports = {
+  createWhatsAppClient,
+  findGroupByName,
+  listGroups,
+  resolvePhoneId,
+  sendAndConfirm,
+  installReactionHook,
+  MessageMedia,
+};

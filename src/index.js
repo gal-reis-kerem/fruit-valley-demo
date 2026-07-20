@@ -1,6 +1,6 @@
 const { config } = require('./config');
 const log = require('./logger');
-const { createWhatsAppClient, listGroups, resolvePhoneId } = require('./whatsapp/client');
+const { createWhatsAppClient, listGroups, resolvePhoneId, installReactionHook } = require('./whatsapp/client');
 const { Orchestrator } = require('./flow/orchestrator');
 const { startWebServer } = require('./web/server');
 
@@ -136,7 +136,23 @@ async function launchClient(attempt) {
       }
     });
 
-    // Emoji reactions (FR-11: sheet printed, picking started)
+    // Emoji reactions (FR-11: sheet printed, picking started).
+    // wwebjs's own listener is broken on current WhatsApp Web, so reactions
+    // arrive through our page hook; the wwebjs event stays as a backup.
+    try {
+      await installReactionHook(client, (events) => {
+        for (const ev of events) {
+          if (!ev.emoji || !ev.parentKey) continue;
+          log.info(`ריאקשן נקלט: ${ev.emoji}`);
+          flow
+            .handleReaction({ reaction: ev.emoji, msgId: ev.parentKey, senderId: ev.sender })
+            .catch((err) => log.error('שגיאה בטיפול בריאקשן:', err));
+        }
+      });
+    } catch (err) {
+      log.error('התקנת הוק הריאקשנים נכשלה:', err.message);
+    }
+
     client.on('message_reaction', async (reaction) => {
       try {
         await flow.handleReaction(reaction);
