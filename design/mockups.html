@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html dir="rtl" lang="he">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>פירות העמק — מוקאפ UI</title>
+<style>
+  :root {
+    --green: #1E6B34;
+    --green-dark: #145126;
+    --yellow: #F2B705;
+    --yellow-soft: #FBE28A;
+    --red: #C63B2F;
+    --cream: #FAF6EC;
+    --ink: #24301F;
+    --card: #FFFFFF;
+    --terminal-bg: #182418;
+    --terminal-text: #C8E6C9;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", "Heebo", Arial, sans-serif;
+    background: var(--cream); color: var(--ink); min-height: 100vh;
+  }
+
+  /* ===== wizard step breadcrumb ===== */
+  .stepbar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 99;
+    background: #fff; border-bottom: 1px solid #EDE7D4;
+    display: flex; justify-content: center; align-items: center; gap: 10px;
+    padding: 12px 10px; font-size: 14px; color: #A39F8C;
+  }
+  .stepbar .step { cursor: pointer; padding: 2px 6px; border-radius: 6px; }
+  .stepbar .step.active { color: var(--green-dark); font-weight: 800; }
+  .stepbar .step.done { color: var(--green); }
+  .stepbar .sep { color: #D8D2C0; font-weight: 700; }
+  .stepbar .to-dash { position: absolute; left: 12px; font-size: 11px; color: #C9C4B2; cursor: pointer; }
+  .screen { display: none; min-height: 100vh; padding-top: 44px; }
+  .screen.visible { display: flex; flex-direction: column; }
+  #s5.screen { padding-top: 0; }
+
+  /* ===== shared ===== */
+  .center { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px; }
+  .btn {
+    background: var(--green); color: #fff; border: 0; border-radius: 12px;
+    font-size: 18px; font-weight: 700; padding: 14px 44px; cursor: pointer;
+    box-shadow: 0 4px 14px rgba(30,107,52,.3); transition: transform .1s;
+  }
+  .btn:hover { transform: translateY(-1px); }
+  .btn.yellow { background: var(--yellow); color: var(--ink); box-shadow: 0 4px 14px rgba(242,183,5,.4); }
+  .wizard-card {
+    background: var(--card); border-radius: 20px; padding: 44px 52px; max-width: 560px; width: 100%;
+    box-shadow: 0 10px 40px rgba(36,48,31,.12); text-align: center;
+  }
+  .wizard-card h1 { font-size: 26px; color: var(--green-dark); margin-bottom: 8px; }
+  .wizard-card p.sub { color: #6b7361; font-size: 15px; margin-bottom: 26px; line-height: 1.6; }
+  input[type=text] {
+    width: 100%; padding: 13px 16px; font-size: 17px; border: 2px solid #E2DCC8;
+    border-radius: 10px; text-align: center; direction: ltr; margin-bottom: 18px;
+    background: #FFFDF6;
+  }
+  input[type=text]:focus { outline: none; border-color: var(--yellow); }
+
+  /* ===== screen 1: welcome ===== */
+  #s1 { background: linear-gradient(180deg, var(--cream) 60%, var(--yellow-soft) 130%); }
+  #s1 .logo-big { width: 190px; height: 190px; border-radius: 50%; box-shadow: 0 12px 44px rgba(36,48,31,.18); margin-bottom: 30px; }
+  #s1 h1 { font-size: 40px; color: var(--green-dark); letter-spacing: -0.5px; }
+  #s1 .powered { margin: 10px 0 6px; font-size: 15px; color: var(--red); font-weight: 700; }
+  #s1 .tagline { color: #6b7361; font-size: 17px; margin-bottom: 40px; }
+
+  /* ===== screen 2: whatsapp ===== */
+  .qr-box {
+    width: 210px; height: 210px; margin: 6px auto 14px; background: #fff; border: 2px dashed #D8D2C0;
+    border-radius: 14px; display: flex; align-items: center; justify-content: center;
+  }
+  .qr-box img { width: 180px; height: 180px; image-rendering: pixelated; }
+  .qr-hint { font-size: 13px; color: #6b7361; margin-bottom: 20px; line-height: 1.6; }
+
+  /* ===== screen 3: sheets ===== */
+  .sheet-icon { width: 54px; height: 54px; margin: 0 auto 12px; }
+  .sync-note {
+    background: var(--yellow-soft); border-radius: 10px; padding: 10px 14px; font-size: 13.5px;
+    color: #5c4d0a; margin-bottom: 20px; line-height: 1.6;
+  }
+
+  /* ===== screen 4: done ===== */
+  #s4 .wizard-card { border-top: 8px solid var(--yellow); }
+  .check-circle {
+    width: 74px; height: 74px; border-radius: 50%; margin: 0 auto 16px;
+    background: var(--green); color: #fff; font-size: 40px; font-weight: 800;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 8px 24px rgba(30,107,52,.35);
+  }
+
+  /* ===== screen 5: dashboard ===== */
+  #s5 { background: var(--cream); }
+  .dash-header {
+    display: flex; align-items: center; gap: 14px; padding: 14px 26px;
+    background: #fff; border-bottom: 3px solid var(--yellow); box-shadow: 0 2px 10px rgba(36,48,31,.06);
+  }
+  .dash-header img { width: 44px; height: 44px; border-radius: 50%; }
+  .dash-header .title { font-size: 19px; font-weight: 800; color: var(--green-dark); }
+  .dash-header .title small { display: block; font-size: 11.5px; color: var(--red); font-weight: 700; }
+  .status-pill {
+    margin-inline-start: auto; display: flex; align-items: center; gap: 8px;
+    background: #E8F5E9; color: var(--green-dark); font-weight: 700; font-size: 13.5px;
+    border-radius: 999px; padding: 7px 16px;
+  }
+  .led { width: 10px; height: 10px; border-radius: 50%; background: #2E7D32; box-shadow: 0 0 6px #2E7D32; }
+  .keep-open {
+    text-align: center; background: var(--yellow-soft); color: #5c4d0a;
+    font-size: 13.5px; font-weight: 700; padding: 8px; border-bottom: 1px solid #eadfa9;
+  }
+  .workers { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; padding: 24px 26px 6px; }
+  .worker-card {
+    background: #fff; border-radius: 18px; box-shadow: 0 6px 24px rgba(36,48,31,.09);
+    overflow: hidden; display: flex; flex-direction: column;
+  }
+  .worker-head { display: flex; align-items: center; gap: 12px; padding: 16px 18px 12px; }
+  .avatar {
+    width: 52px; height: 52px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    font-size: 24px; font-weight: 800; color: #fff;
+  }
+  .naama .avatar { background: linear-gradient(135deg, var(--green), #4CAF50); }
+  .yuval .avatar { background: linear-gradient(135deg, var(--red), #E57368); }
+  .worker-head .who b { font-size: 17px; }
+  .worker-head .who span { display: block; font-size: 12.5px; color: #6b7361; }
+  .worker-head .busy {
+    margin-inline-start: auto; font-size: 11.5px; font-weight: 700; border-radius: 999px; padding: 4px 10px;
+    background: #E8F5E9; color: var(--green-dark);
+  }
+  .terminal {
+    background: var(--terminal-bg); color: var(--terminal-text); font-family: "SF Mono", Menlo, monospace;
+    font-size: 12.5px; line-height: 1.75; padding: 14px 16px; height: 190px; overflow-y: auto;
+    direction: rtl;
+  }
+  .terminal .t { color: #7d9c7d; margin-inline-end: 6px; font-size: 11px; }
+  .terminal .line { animation: fadein .4s; }
+  .terminal .line.hl { color: var(--yellow-soft); }
+  @keyframes fadein { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; } }
+  .worker-stats {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 13px 18px; border-top: 1px solid #F0EBDB;
+  }
+  .worker-stats .count b { font-size: 26px; color: var(--green-dark); }
+  .worker-stats .count span { font-size: 12.5px; color: #6b7361; display: block; }
+
+  /* customers table */
+  .customers {
+    margin: 16px 26px; background: #fff; border-radius: 18px;
+    box-shadow: 0 6px 24px rgba(36,48,31,.09); overflow: hidden;
+  }
+  .customers-head {
+    display: flex; align-items: center; gap: 16px; padding: 16px 20px 12px;
+  }
+  .customers-head h2 { font-size: 16.5px; color: var(--green-dark); }
+  .day-progress { margin-inline-start: auto; display: flex; align-items: center; gap: 10px; font-size: 13px; color: #6b7361; font-weight: 700; }
+  .bar { width: 160px; height: 8px; border-radius: 999px; background: #EFEAD8; overflow: hidden; }
+  .bar > div { height: 100%; width: 40%; background: linear-gradient(90deg, var(--green), #4CAF50); border-radius: 999px; }
+  table.cust { width: 100%; border-collapse: collapse; font-size: 14px; }
+  table.cust th {
+    text-align: right; font-size: 12px; color: #A39F8C; font-weight: 700;
+    padding: 8px 20px; border-top: 1px solid #F0EBDB; border-bottom: 1px solid #F0EBDB; background: #FCFAF2;
+  }
+  table.cust td { padding: 11px 20px; border-bottom: 1px solid #F7F3E6; }
+  table.cust tr:last-child td { border-bottom: 0; }
+  table.cust tr.clickable { cursor: pointer; }
+  table.cust tr.clickable:hover { background: #FCFAF2; }
+  .badge-status { display: inline-flex; align-items: center; gap: 7px; font-weight: 700; font-size: 13px; }
+  .badge-status .d { width: 9px; height: 9px; border-radius: 50%; }
+  .ordered .d { background: #2E7D32; } .ordered { color: var(--green-dark); }
+  .not-yet .d { background: #C9C4B2; } .not-yet { color: #8b877a; }
+  .pdf-link { color: var(--green); font-weight: 700; font-size: 13px; text-decoration: underline; cursor: pointer; }
+  .muted { color: #B5B09E; font-size: 13px; }
+
+  .footer-links { display: flex; justify-content: center; padding: 4px 0 26px; }
+  .folder-link {
+    display: inline-flex; align-items: center; gap: 10px; background: #fff; border: 2px solid var(--yellow);
+    color: var(--ink); font-weight: 700; font-size: 15px; border-radius: 12px; padding: 12px 26px;
+    cursor: pointer; box-shadow: 0 4px 14px rgba(242,183,5,.18);
+  }
+  .folder-link svg { width: 18px; height: 18px; fill: var(--yellow); }
+</style>
+</head>
+<body>
+
+<div class="stepbar" id="stepbar">
+  <span class="step active" data-s="s1">פתיחה</span>
+  <span class="sep">&lt;</span>
+  <span class="step" data-s="s2">חיבור וואטסאפ</span>
+  <span class="sep">&lt;</span>
+  <span class="step" data-s="s3">חיבור לקוחות</span>
+  <span class="sep">&lt;</span>
+  <span class="step" data-s="s4">סיום</span>
+  <span class="to-dash" data-s="s5">(מוקאפ: לדשבורד)</span>
+</div>
+
+<!-- ========== 1: WELCOME ========== -->
+<section class="screen visible" id="s1">
+  <div class="center">
+    <img class="logo-big" src="../assets/logo.png" alt="פירות העמק">
+    <h1>פירות העמק</h1>
+    <div class="powered">Triple Digital Workforce</div>
+    <div class="tagline">העובדים הדיגיטליים שלכם מוכנים להצטרף לצוות</div>
+    <button class="btn" onclick="go('s2')">הבא</button>
+  </div>
+</section>
+
+<!-- ========== 2: WHATSAPP ========== -->
+<section class="screen" id="s2">
+  <div class="center">
+    <div class="wizard-card">
+      <h1>חיבור הוואטסאפ של העסק</h1>
+      <p class="sub">הזינו את מספר הטלפון של העסק — זה המספר שאליו הלקוחות שולחים הזמנות</p>
+      <input type="text" placeholder="050-0000000">
+      <div class="qr-box"><img src="qr-sample.png" alt="QR"></div>
+      <div class="qr-hint">בטלפון של העסק: <b>וואטסאפ &lt; הגדרות &lt; מכשירים מקושרים &lt; קישור מכשיר</b><br>וסרקו את הקוד</div>
+      <button class="btn" onclick="go('s3')">הבא</button>
+    </div>
+  </div>
+</section>
+
+<!-- ========== 3: SHEETS CRM ========== -->
+<section class="screen" id="s3">
+  <div class="center">
+    <div class="wizard-card">
+      <svg class="sheet-icon" viewBox="0 0 24 24"><rect x="3" y="2" width="18" height="20" rx="2" fill="#1E6B34"/><rect x="6" y="6" width="12" height="2.2" rx="1" fill="#FBE28A"/><rect x="6" y="10" width="12" height="2.2" rx="1" fill="#fff" opacity=".85"/><rect x="6" y="14" width="12" height="2.2" rx="1" fill="#fff" opacity=".85"/><rect x="6" y="18" width="7" height="2.2" rx="1" fill="#fff" opacity=".85"/></svg>
+      <h1>חיבור טבלת הלקוחות</h1>
+      <p class="sub">הדביקו קישור לגיליון Google Sheets עם רשימת הלקוחות ואנשי הקשר של כל לקוח</p>
+      <input type="text" placeholder="https://docs.google.com/spreadsheets/d/...">
+      <div class="sync-note">מהרגע שהחיבור פעיל — כל עדכון בטבלה מתעדכן אוטומטית גם אצל העובדים הדיגיטליים</div>
+      <button class="btn" onclick="go('s4')">הבא</button>
+    </div>
+  </div>
+</section>
+
+<!-- ========== 4: DONE ========== -->
+<section class="screen" id="s4">
+  <div class="center">
+    <div class="wizard-card">
+      <div class="check-circle">✓</div>
+      <h1>כל הכבוד!</h1>
+      <p class="sub" style="font-size:17px">העובדים הדיגיטליים שלנו מתרגשים להצטרף<br>לצוות של <b>פירות העמק</b>!</p>
+      <button class="btn yellow" onclick="go('s5')">בואו נתחיל</button>
+    </div>
+  </div>
+</section>
+
+<!-- ========== 5: DASHBOARD ========== -->
+<section class="screen" id="s5">
+  <div class="dash-header">
+    <img src="../assets/logo.png" alt="">
+    <div class="title">פירות העמק<small>Triple Digital Workforce</small></div>
+    <div class="status-pill"><div class="led"></div>מחובר ופעיל</div>
+  </div>
+  <div class="keep-open">לא לצאת מתוכנה זו — השאירו אותה פתוחה ברקע</div>
+
+  <div class="workers">
+    <div class="worker-card naama">
+      <div class="worker-head">
+        <div class="avatar">נ</div>
+        <div class="who"><b>נעמה</b><span>סידור הזמנות וקשרי לקוחות</span></div>
+        <div class="busy" id="naama-busy">זמינה</div>
+      </div>
+      <div class="terminal" id="naama-term"></div>
+      <div class="worker-stats">
+        <div class="count"><b id="naama-count">0</b><span>הזמנות שטופלו היום</span></div>
+      </div>
+    </div>
+
+    <div class="worker-card yuval">
+      <div class="worker-head">
+        <div class="avatar">י</div>
+        <div class="who"><b>יובל</b><span>הכנת מסמכים וקשר מלקטים</span></div>
+        <div class="busy" id="yuval-busy">זמין</div>
+      </div>
+      <div class="terminal" id="yuval-term"></div>
+      <div class="worker-stats">
+        <div class="count"><b id="yuval-count">0</b><span>דפי ליקוט שהופקו היום</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="customers">
+    <div class="customers-head">
+      <h2>הלקוחות היום</h2>
+      <div class="day-progress">
+        <span>2 מתוך 5 השלימו הזמנה</span>
+        <div class="bar"><div></div></div>
+      </div>
+    </div>
+    <table class="cust">
+      <thead>
+        <tr><th>לקוח</th><th>סטטוס</th><th>הזמנה אחרונה</th><th>קובץ עדכני</th></tr>
+      </thead>
+      <tbody>
+        <tr class="clickable">
+          <td><b>כרם קפיטל</b></td>
+          <td><span class="badge-status ordered"><span class="d"></span>הזמינה היום</span></td>
+          <td>KC-25072026 · גרסה 2</td>
+          <td><span class="pdf-link">פתיחת ה-PDF האחרון</span></td>
+        </tr>
+        <tr class="clickable">
+          <td><b>טריפל</b></td>
+          <td><span class="badge-status ordered"><span class="d"></span>הזמינה היום</span></td>
+          <td>TR-25072026 · גרסה 1</td>
+          <td><span class="pdf-link">פתיחת ה-PDF האחרון</span></td>
+        </tr>
+        <tr class="clickable">
+          <td><b>סולראדג'</b></td>
+          <td><span class="badge-status not-yet"><span class="d"></span>טרם הזמינה</span></td>
+          <td class="muted">—</td>
+          <td class="muted">—</td>
+        </tr>
+        <tr class="clickable">
+          <td><b>פודי פיירי</b></td>
+          <td><span class="badge-status not-yet"><span class="d"></span>טרם הזמינה</span></td>
+          <td class="muted">—</td>
+          <td class="muted">—</td>
+        </tr>
+        <tr class="clickable">
+          <td><b>אלוני אבא</b></td>
+          <td><span class="badge-status not-yet"><span class="d"></span>טרם הזמינה</span></td>
+          <td class="muted">—</td>
+          <td class="muted">—</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="footer-links">
+    <button class="folder-link">
+      <svg viewBox="0 0 24 24"><path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/></svg>
+      תיקיית הלקוחות
+    </button>
+  </div>
+</section>
+
+<script>
+function go(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('visible'));
+  document.getElementById(id).classList.add('visible');
+  const order = ['s1', 's2', 's3', 's4'];
+  const idx = order.indexOf(id);
+  document.querySelectorAll('.stepbar .step').forEach((b) => {
+    const bIdx = order.indexOf(b.dataset.s);
+    b.classList.toggle('active', b.dataset.s === id);
+    b.classList.toggle('done', idx >= 0 && bIdx >= 0 && bIdx < idx);
+  });
+  document.getElementById('stepbar').style.display = id === 's5' ? 'none' : 'flex';
+  if (id === 's5' && !window.demoStarted) { window.demoStarted = true; runDemo(); }
+}
+document.querySelectorAll('.stepbar .step, .stepbar .to-dash').forEach(b => b.onclick = () => go(b.dataset.s));
+
+// ===== demo feed (emojis here come from real customer/worker chatter) =====
+const naamaLines = [
+  ['09:12', 'הודעה חדשה בוואטסאפ מ־כרם קפיטל', 1],
+  ['09:12', 'קוראת את ההזמנה… מפרידה מוצרים, כמויות והערות'],
+  ['09:12', 'מנקה את הטקסט ומסדרת לפי אזורי ליקוט'],
+  ['09:13', 'שולחת אישור ללקוח: "קיבלתי 🙌 מספר הזמנה KC-25072026"'],
+  ['09:13', 'מעבירה את ההזמנה הנקייה ליובל'],
+  ['10:02', 'הודעה חדשה מ־טריפל', 1],
+  ['10:02', 'לא צוינה חברה בהודעה — שואלת את הלקוח לאיזו חברה ההזמנה'],
+  ['10:03', 'הלקוח ענה: טריפל. משייכת ומעבירה ליובל'],
+  ['11:47', 'תוספת להזמנה של כרם קפיטל: 2 אבטיחים'],
+  ['11:47', 'משייכת את התוספת להזמנה KC-25072026 ומעדכנת את יובל'],
+];
+const yuvalLines = [
+  ['09:13', 'קיבלתי הזמנה נקייה מנעמה (כרם קפיטל)', 1],
+  ['09:13', 'מכין דף ליקוט בעברית, אנגלית ותאית…'],
+  ['09:13', 'דף הליקוט KC-25072026 נשלח לקבוצת ההדפסות'],
+  ['09:14', 'שלחתי בקשת תמונות לקבוצת התיעוד'],
+  ['09:31', 'מלקט סימן 👍 על הדף — הודפס והליקוט התחיל'],
+  ['10:03', 'מכין דף ליקוט לטריפל (TR-25072026)…', 1],
+  ['10:04', 'נשלח לקבוצת ההדפסות + בקשת תמונות'],
+  ['11:47', 'תוספת אחרי הדפסה — מעדכן את המלקטים בתגובה על הדף'],
+  ['11:48', 'מפיק גרסה מעודכנת V2 לתיקיית הלקוח'],
+  ['12:20', 'התקבלו 2 תמונות תיעוד — ההזמנה KC-25072026 הושלמה'],
+];
+function feed(termId, countId, busyId, lines, i = 0, count = 0) {
+  if (i >= lines.length) { document.getElementById(busyId).textContent = termId.startsWith('naama') ? 'זמינה' : 'זמין'; return; }
+  const [t, text, isNew] = lines[i];
+  const term = document.getElementById(termId);
+  const div = document.createElement('div');
+  div.className = 'line' + (isNew ? ' hl' : '');
+  div.innerHTML = `<span class="t">${t}</span>${text}`;
+  term.appendChild(div);
+  term.scrollTop = term.scrollHeight;
+  if (isNew) {
+    count += 1;
+    document.getElementById(countId).textContent = count;
+    document.getElementById(busyId).textContent = termId.startsWith('naama') ? 'מטפלת בהזמנה…' : 'מכין מסמכים…';
+  }
+  setTimeout(() => feed(termId, countId, busyId, lines, i + 1, count), 900 + Math.random() * 700);
+}
+function runDemo() {
+  feed('naama-term', 'naama-count', 'naama-busy', naamaLines);
+  setTimeout(() => feed('yuval-term', 'yuval-count', 'yuval-busy', yuvalLines), 1500);
+}
+</script>
+</body>
+</html>
