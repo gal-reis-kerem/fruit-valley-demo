@@ -11,6 +11,39 @@ const log = require('../src/logger');
 
 let win = null;
 
+// ---- customer portal (external link) health ----
+const portalStatus = { configured: false, ok: null, error: null };
+async function checkPortal() {
+  const { portalUrl } = readSettings();
+  portalStatus.configured = Boolean(portalUrl);
+  if (!portalUrl) {
+    portalStatus.ok = null;
+    return portalStatus;
+  }
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 10000);
+    const res = await fetch(portalUrl, { method: 'GET', redirect: 'follow', signal: ctrl.signal });
+    clearTimeout(t);
+    portalStatus.ok = res.ok;
+    portalStatus.error = res.ok ? null : `HTTP ${res.status}`;
+  } catch (err) {
+    portalStatus.ok = false;
+    portalStatus.error = err.message;
+  }
+  forward('conn', connSnapshot());
+  return portalStatus;
+}
+setInterval(checkPortal, 5 * 60 * 1000);
+
+function connSnapshot() {
+  return {
+    whatsapp: { state: engine.state.state, error: engine.state.error },
+    crm: sheets.getStatus(),
+    portal: { ...portalStatus },
+  };
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1180,
@@ -26,6 +59,11 @@ function createWindow() {
     },
   });
   win.setMenuBarVisibility(false);
+  if (process.env.FV_DEBUG) {
+    win.webContents.on('console-message', (e, level, message) =>
+      require('fs').appendFileSync(process.env.FV_DEBUG, `[${level}] ${message}\n`),
+    );
+  }
   win.loadFile(path.join(__dirname, 'ui', 'index.html'));
 }
 
@@ -35,8 +73,11 @@ function forward(channel, payload) {
 }
 
 engine.bus.on('worker', (ev) => forward('worker', ev));
-engine.bus.on('status', (ev) => forward('status', ev));
-engine.bus.on('crm', (ev) => forward('crm', ev));
+engine.bus.on('status', () => forward('conn', connSnapshot()));
+engine.bus.on('crm', (ev) => {
+  forward('crm', ev);
+  forward('conn', connSnapshot());
+});
 engine.bus.on('qr', async ({ qr }) => {
   try {
     forward('qr', { dataUrl: await QRCode.toDataURL(qr, { width: 360, margin: 1 }) });
@@ -48,13 +89,12 @@ engine.bus.on('qr', async ({ qr }) => {
 // ---- renderer -> engine ----
 ipcMain.handle('get-boot', async () => ({
   settings: readSettings(),
-  state: engine.state.state,
-  error: engine.state.error,
+  conn: connSnapshot(),
   companies: config.companies.map((c) => c.name),
   qrDataUrl: engine.state.qr ? await QRCode.toDataURL(engine.state.qr, { width: 360, margin: 1 }) : null,
 }));
-ipcMain.handle('get-stats', () => engine.getStats());
-ipcMain.handle('get-customers', () => engine.getCustomers());
+ipcMain.handle('get-conn', () => connSnapshot());
+ipcMain.handle('get-customers', (e, date) => engine.getCustomers(date));
 ipcMain.handle('save-phone', (e, phone) => writeSettings({ businessPhone: phone }));
 ipcMain.handle('save-sheet', async (e, url) => {
   if (!url || !url.trim()) {
@@ -70,7 +110,36 @@ ipcMain.handle('save-sheet', async (e, url) => {
     return { ok: false, error: err.message };
   }
 });
+ipcMain.handle('save-portal', async (e, url) => {
+  writeSettings({ portalUrl: (url || '').trim() });
+  await checkPortal();
+  return { ok: !portalStatus.configured || portalStatus.ok !== false, error: portalStatus.error };
+});
+ipcMain.handle('save-workers', (e, workers) => writeSettings({ workers }));
 ipcMain.handle('finish-setup', () => writeSettings({ setupDone: true }));
+ipcMain.handle('reconnect-whatsapp', async () => {
+  try {
+    await engine.stopWhatsApp();
+  } catch (err) { /* keep going */ }
+  engine.startWhatsApp().catch((err) => log.error('חיבור מחדש נכשל:', err.message));
+});
+ipcMain.handle('retry-crm', async () => {
+  const { sheetUrl } = readSettings();
+  if (!sheetUrl) return { ok: false, error: 'לא הוגדר גיליון' };
+  try {
+    await sheets.refresh(sheetUrl);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  } finally {
+    forward('conn', connSnapshot());
+  }
+});
+ipcMain.handle('retry-portal', () => checkPortal());
+ipcMain.handle('open-portal', () => {
+  const { portalUrl } = readSettings();
+  if (portalUrl) shell.openExternal(portalUrl);
+});
 ipcMain.handle('open-customers-folder', () => shell.openPath(config.outputDir));
 ipcMain.handle('open-path', (e, p) => {
   // only paths inside the output folder may be opened from the UI
@@ -81,13 +150,16 @@ app.whenReady().then(async () => {
   createWindow();
   engine.start({ cli: false, webPanel: false }).catch((err) => {
     log.error('המנוע נפל בעלייה:', err.message);
-    forward('status', { state: 'error', error: err.message });
+    forward('conn', connSnapshot());
   });
+  checkPortal();
 
   // screenshot mode for automated verification: FV_SHOT=/path/to.png
   if (process.env.FV_SHOT) {
     setTimeout(async () => {
       try {
+        if (process.env.FV_SHOT_JS) await win.webContents.executeJavaScript(process.env.FV_SHOT_JS);
+        await new Promise((r) => setTimeout(r, 800));
         const img = await win.webContents.capturePage();
         require('fs').writeFileSync(process.env.FV_SHOT, img.toPNG());
       } finally {

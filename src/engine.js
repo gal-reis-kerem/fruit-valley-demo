@@ -248,8 +248,8 @@ async function start({ cli = false, webPanel = true } = {}) {
 function getStats() {
   return store.todayStats(store.loadDB());
 }
-function getCustomers() {
-  return store.customersOverview(store.loadDB(), config.companies);
+function getCustomers(date) {
+  return store.customersOverview(store.loadDB(), config.companies, date);
 }
 
 module.exports = { start, startWhatsApp, stopWhatsApp, state, bus, getStats, getCustomers, config };

@@ -9,6 +9,11 @@ const log = require('../logger');
 const bus = require('../bus');
 
 let pollTimer = null;
+const status = { configured: false, ok: null, lastSync: null, error: null };
+
+function getStatus() {
+  return { ...status };
+}
 
 function csvUrlFrom(sheetUrl) {
   const m = String(sheetUrl || '').match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
@@ -107,9 +112,19 @@ function contactCompanies(phoneId) {
 }
 
 async function refresh(sheetUrl) {
-  const companies = await fetchCompanies(sheetUrl);
-  applyCompanies(companies);
-  return companies;
+  status.configured = true;
+  try {
+    const companies = await fetchCompanies(sheetUrl);
+    applyCompanies(companies);
+    status.ok = true;
+    status.lastSync = Date.now();
+    status.error = null;
+    return companies;
+  } catch (err) {
+    status.ok = false;
+    status.error = err.message;
+    throw err;
+  }
 }
 
 function startPolling(sheetUrl, intervalMs = 5 * 60 * 1000) {
@@ -130,4 +145,4 @@ function stopPolling() {
   pollTimer = null;
 }
 
-module.exports = { refresh, startPolling, stopPolling, contactCompanies, csvUrlFrom };
+module.exports = { refresh, startPolling, stopPolling, contactCompanies, csvUrlFrom, getStatus };

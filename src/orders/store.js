@@ -172,25 +172,37 @@ function todayStats(db) {
   return { naama: naamaOrders.size, yuval: sheets };
 }
 
-// Per-company overview for the dashboard customers table.
-function customersOverview(db, companies) {
-  const today = todayIsrael();
-  const isToday = (ts) =>
-    new Date(ts).toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' }) === today;
+// Per-company overview for a given date (default: today, Israel time).
+// stage: none -> received (PDF sent) -> picking (emoji seen) -> picked
+// (photos in). Future stages (invoice, shipped) belong to closed modules.
+function customersOverview(db, companies, date) {
+  const target = date || todayIsrael();
+  const isOnDate = (ts) =>
+    new Date(ts).toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' }) === target;
   return companies.map((c) => {
-    const orders = db.orders
-      .filter((o) => o.customerName === c.name)
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    const todayOrder = orders.find(
-      (o) => (o.history || []).some((h) => isToday(h.ts)) && !['cancelled', 'archived'].includes(o.status),
-    );
-    const last = orders.find((o) => o.status !== 'archived');
+    // An order belongs to a date if it is that date's delivery board
+    // (KC-<ddmmyyyy>) or if it had activity on that date.
+    const dateOrder = db.orders
+      .filter(
+        (o) =>
+          o.customerName === c.name &&
+          !['cancelled', 'archived'].includes(o.status) &&
+          (o.deliveryDate === target || (o.history || []).some((h) => isOnDate(h.ts))),
+      )
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] || null;
+    let stage = 'none';
+    if (dateOrder) {
+      if (dateOrder.status === 'documented') stage = 'picked';
+      else if (dateOrder.reaction) stage = 'picking';
+      else stage = 'received';
+    }
     return {
       name: c.name,
-      orderedToday: Boolean(todayOrder),
-      lastOrderId: last ? last.id : null,
-      lastVersion: last ? last.version : null,
-      lastPdf: last && last.pdfPath ? last.pdfPath : null,
+      stage,
+      orderedToday: Boolean(dateOrder),
+      lastOrderId: dateOrder ? dateOrder.id : null,
+      lastVersion: dateOrder ? dateOrder.version : null,
+      lastPdf: dateOrder && dateOrder.pdfPath ? dateOrder.pdfPath : null,
     };
   });
 }
