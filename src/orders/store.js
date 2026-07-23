@@ -152,7 +152,52 @@ function findAwaitingPhotos(db) {
   return waiting[0] || null;
 }
 
+// Daily stats for the dashboard: how many orders Naama handled today and
+// how many sheets Yuval produced today (by history timestamps, Israel time).
+function todayStats(db) {
+  const today = todayIsrael();
+  const isToday = (ts) =>
+    new Date(ts).toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' }) === today;
+  const naamaActions = ['order_created', 'addition_received', 'order_updated', 'order_cancelled'];
+  const yuvalActions = ['pdf_sent_to_group', 'pdf_regenerated'];
+  const naamaOrders = new Set();
+  let sheets = 0;
+  for (const o of db.orders) {
+    for (const h of o.history || []) {
+      if (!isToday(h.ts)) continue;
+      if (naamaActions.includes(h.action)) naamaOrders.add(o.id);
+      if (yuvalActions.includes(h.action)) sheets += 1;
+    }
+  }
+  return { naama: naamaOrders.size, yuval: sheets };
+}
+
+// Per-company overview for the dashboard customers table.
+function customersOverview(db, companies) {
+  const today = todayIsrael();
+  const isToday = (ts) =>
+    new Date(ts).toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' }) === today;
+  return companies.map((c) => {
+    const orders = db.orders
+      .filter((o) => o.customerName === c.name)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const todayOrder = orders.find(
+      (o) => (o.history || []).some((h) => isToday(h.ts)) && !['cancelled', 'archived'].includes(o.status),
+    );
+    const last = orders.find((o) => o.status !== 'archived');
+    return {
+      name: c.name,
+      orderedToday: Boolean(todayOrder),
+      lastOrderId: last ? last.id : null,
+      lastVersion: last ? last.version : null,
+      lastPdf: last && last.pdfPath ? last.pdfPath : null,
+    };
+  });
+}
+
 module.exports = {
+  todayStats,
+  customersOverview,
   loadDB,
   saveDB,
   createOrder,

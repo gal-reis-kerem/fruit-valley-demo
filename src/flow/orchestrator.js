@@ -7,6 +7,7 @@ const store = require('../orders/store');
 const { generatePickingSheetPDF } = require('../pdf/generator');
 const { MessageMedia, sendAndConfirm, resolvePhoneId } = require('../whatsapp/client');
 const replies = require('./replies');
+const bus = require('../bus');
 
 /**
  * The core business flow (PRD "זרימת המוצר המרכזית", steps 1-8):
@@ -93,10 +94,13 @@ class Orchestrator {
   }
 
   // ---------- Step 1-5: incoming customer message ----------
-  async handleCustomerMessage(msg) {
+  // forcedCompany: when the sender is a CRM contact of exactly one company,
+  // attribution is automatic and the "which company?" question is skipped.
+  async handleCustomerMessage(msg, forcedCompany = null) {
     this.reload();
     const body = (msg.body || '').trim();
     log.info(`הודעה מהנציג: "${body.slice(0, 80)}${body.length > 80 ? '…' : ''}"`);
+    bus.naama('הודעה חדשה התקבלה בוואטסאפ');
 
     if (!body && msg.hasMedia) {
       // A bare image from the customer (e.g. photo of a specific product) —
@@ -122,6 +126,7 @@ class Orchestrator {
         const { parsed, rawBody } = this.pending;
         this.pending = null;
         log.info(`החברה זוהתה מהתשובה: ${company.name}`);
+        bus.naama(`הלקוח ענה: ${company.name} — משייכת את ההזמנה`);
         return this.dispatchParsed(msg, parsed, rawBody, company);
       }
       // Not a company answer — drop the pending draft and process normally
@@ -139,14 +144,17 @@ class Orchestrator {
     }
 
     log.info(`סיווג: ${parsed.classification}, פריטים: ${parsed.items.length}, חברה: ${parsed.company || 'לא צוינה'}`);
+    bus.naama(`קוראת את ההודעה: ${parsed.items.length ? `${parsed.items.length} פריטים` : 'הודעה כללית'}${parsed.company ? ` · ${parsed.company}` : ''}`);
 
     if (parsed.classification === 'general') {
       return this.safeReply(msg, this.customerText(parsed, null, replies.general()));
     }
 
     // Attribute the order to a company (FR-04). The rep serves several
-    // companies — if none was named, ask and hold the draft.
-    const company = this.findCompany(parsed.company) || this.matchCompanyByText(parsed.company || '');
+    // companies — if none was named, ask and hold the draft. A single-company
+    // CRM contact is attributed automatically.
+    const company =
+      forcedCompany || this.findCompany(parsed.company) || this.matchCompanyByText(parsed.company || '');
     if (!company) {
       // An addition/change/cancellation with exactly one open order overall
       // attaches to it without nagging the rep.
@@ -163,6 +171,7 @@ class Orchestrator {
         }
       }
       this.pending = { parsed, rawBody: body, at: Date.now() };
+      bus.naama('לא צוינה חברה — שואלת את הלקוח לאיזו חברה ההזמנה');
       const question =
         parsed.reply_text && !parsed.reply_text.includes('{{ORDER}}')
           ? parsed.reply_text
@@ -223,7 +232,10 @@ class Orchestrator {
     this.save();
 
     // FR-02: immediate, human-sounding ack with the unified order number
+    bus.naama(`הזמנה חדשה של ${order.customerName} — ${order.items.length} פריטים`, true);
     await this.safeReply(msg, this.customerText(parsed, order, replies.newOrder(order, config.changesCutoff)));
+    bus.naama(`שלחה אישור ללקוח · מספר הזמנה ${order.id}`);
+    bus.naama('מעבירה את ההזמנה הנקייה ליובל');
 
     await this.sendPickingSheet(order);
   }
@@ -274,6 +286,7 @@ class Orchestrator {
         ` (${printed ? 'אחרי תחילת ליקוט' : late ? 'אחרי שעת הסגירה' : 'לפני הדפסה'})`,
     );
 
+    bus.naama(`עדכון להזמנה ${order.id}: ${added.length ? `+${added.length} פריטים` : ''}${removed.length ? ` -${removed.length} הוסרו` : ''}`.trim());
     const fmt = (it) => `• ${it.product_he}${it.quantity ? ` - ${it.quantity} ${it.unit}` : ''}${it.note ? ` (${it.note})` : ''}`;
     const changesList = [
       ...added.map((it) => `➕ ${fmt(it).slice(2)}`),
@@ -305,6 +318,7 @@ class Orchestrator {
       order.version += 1;
       order.pdfPath = await generatePickingSheetPDF(order);
       store.addHistory(order, 'pdf_regenerated', `גרסה ${order.version} הופקה לתיקייה בלבד (השינוי הגיע אחרי ההדפסה)`);
+      bus.yuval(`שינוי אחרי הדפסה — מעדכן מלקטים ומפיק גרסה ${order.version} לתיקיית הלקוח`);
 
       // Alert the photos group so the manager can reconcile post-print changes
       const what =
@@ -349,6 +363,7 @@ class Orchestrator {
 
   // ---------- Step 5: PDF to the picking group ----------
   async sendPickingSheet(order, { updated = false } = {}) {
+    bus.yuval(`${updated ? 'מעדכן' : 'מכין'} דף ליקוט ${order.id} (גרסה ${order.version}) בעברית, אנגלית ותאית…`, !updated);
     const pdfPath = await generatePickingSheetPDF(order);
     order.pdfPath = pdfPath;
 
@@ -376,6 +391,7 @@ class Orchestrator {
     store.addHistory(order, 'pdf_sent_to_group', `גרסה ${order.version} נשלחה לקבוצה "${this.pickingGroup.name}"`);
     this.save();
     log.info(`דף ליקוט ${order.id} v${order.version} נשלח לקבוצת הליקוט`);
+    bus.yuval(`דף הליקוט ${order.id} נשלח לקבוצת ההדפסות`);
 
     // The photos-group side runs in lockstep with every PDF, so no shipment
     // falls between the chairs: first send opens the photo thread, updates
@@ -391,6 +407,7 @@ class Orchestrator {
         order.photoRequestMsgId ? { quotedMessageId: order.photoRequestMsgId } : {},
       );
       store.addHistory(order, 'version_notice_sent', `הודעת גרסה ${order.version} נשלחה לקבוצת התמונות`);
+      bus.yuval(`עדכנתי את קבוצת התיעוד: הגרסה העדכנית של ${order.customerName} היא ${order.version}`);
       this.save();
     }
   }
@@ -415,6 +432,7 @@ class Orchestrator {
     store.addHistory(order, 'photo_request_sent', `נשלחה לקבוצה "${targetChat.name}"`);
     this.save();
     log.info(`הזמנה ${order.id}: בקשת תמונות נשלחה לקבוצת התמונות`);
+    bus.yuval(`שלחתי בקשת תמונות לקבוצת התיעוד · ${order.id}`);
   }
 
   // ---------- Step 6-7: emoji reaction -> photo request ----------
@@ -460,6 +478,7 @@ class Orchestrator {
     store.addHistory(order, 'picking_started', `ריאקשן ${reaction.reaction} - הדף הודפס והליקוט החל`);
     this.save();
     log.info(`הזמנה ${order.id}: זוהה ריאקשן ${reaction.reaction} - הליקוט החל`);
+    bus.yuval(`מלקט סימן ${reaction.reaction} — הדף הודפס והליקוט התחיל · ${order.id}`);
   }
 
   // ---------- Step 8: photos -> attached to the order ----------
@@ -489,12 +508,14 @@ class Orchestrator {
 
     store.addHistory(order, 'photo_attached', path.basename(savedPath));
     log.info(`הזמנה ${order.id}: צורפה תמונה (${order.photos.length}/2)`);
+    bus.yuval(`תמונת תיעוד ${order.photos.length}/2 התקבלה · ${order.id}`);
 
     // Documentation is complete after the two required photos (marked sheet +
     // packed shipment).
     if (order.photos.length >= 2 && order.status !== 'documented') {
       order.status = 'documented';
       store.addHistory(order, 'order_documented', 'התקבלו שתי תמונות התיעוד - ההזמנה מתועדת ומוכנה להמשך תהליך');
+      bus.yuval(`ההזמנה ${order.id} תועדה במלואה — דף מסומן + משלוח ארוז`);
       this.save();
       await this.safeReply(msg, replies.documented(order));
     } else {
