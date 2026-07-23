@@ -203,6 +203,7 @@ function customersOverview(db, companies, date) {
       lastOrderId: dateOrder ? dateOrder.id : null,
       lastVersion: dateOrder ? dateOrder.version : null,
       lastPdf: dateOrder && dateOrder.pdfPath ? dateOrder.pdfPath : null,
+      postPrintChanges: dateOrder ? (dateOrder.postPrintChanges || []).map((ch) => ch.text) : [],
     };
   });
 }

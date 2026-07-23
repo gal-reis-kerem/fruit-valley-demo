@@ -8,6 +8,7 @@ const { generatePickingSheetPDF } = require('../pdf/generator');
 const { MessageMedia, sendAndConfirm, resolvePhoneId } = require('../whatsapp/client');
 const replies = require('./replies');
 const bus = require('../bus');
+const complaints = require('../complaints');
 
 /**
  * The core business flow (PRD "זרימת המוצר המרכזית", steps 1-8):
@@ -144,6 +145,14 @@ class Orchestrator {
     }
 
     log.info(`סיווג: ${parsed.classification}, פריטים: ${parsed.items.length}, חברה: ${parsed.company || 'לא צוינה'}`);
+
+    // Complaint detection (FR: complaints page) — on any classification
+    if (parsed.complaint) {
+      const complainer = (forcedCompany && forcedCompany.name) || parsed.company || null;
+      complaints.add({ text: parsed.complaint, company: complainer });
+      bus.naama(`זיהיתי תלונה${complainer ? ` מ־${complainer}` : ''} — תויגה בדף התלונות`);
+      log.info(`תלונה תויגה: "${parsed.complaint}"`);
+    }
     bus.naama(`קוראת את ההודעה: ${parsed.items.length ? `${parsed.items.length} פריטים` : 'הודעה כללית'}${parsed.company ? ` · ${parsed.company}` : ''}`);
 
     if (parsed.classification === 'general') {
@@ -302,6 +311,8 @@ class Orchestrator {
     }
 
     if (printed) {
+      order.postPrintChanges = order.postPrintChanges || [];
+      order.postPrintChanges.push({ ts: new Date().toISOString(), text: changesList.replace(/\n/g, ' · ') });
       // Picking already started: don't resend the sheet - update the pickers
       // as a reply to the PDF message (mirrors the real-world practice).
       await sendAndConfirm(

@@ -1,5 +1,6 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const { config } = require('../config');
+const { managerDirectives } = require('../rules');
 
 const client = new Anthropic();
 
@@ -8,8 +9,13 @@ const client = new Anthropic();
 const ORDER_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['classification', 'company', 'delivery_date', 'customer_note', 'location_detail', 'reply_text', 'items'],
+  required: ['classification', 'company', 'complaint', 'delivery_date', 'customer_note', 'location_detail', 'reply_text', 'items'],
   properties: {
+    complaint: {
+      type: ['string', 'null'],
+      description:
+        'If the message contains a complaint about a PAST order/delivery (bad quality, missing items, late delivery, wrong items) - the essence of the complaint in Hebrew, close to the customer wording. A change/removal request for the CURRENT order is NOT a complaint. null when there is no complaint.',
+    },
     company: {
       anyOf: [
         { type: 'string', enum: config.companies.map((c) => c.name) },
@@ -112,7 +118,7 @@ Rules:
 - delivery_date: resolve relative dates ("מחר", "ליום ראשון") to an absolute date. Default: tomorrow (orders are normally for the next day).
 - Keep item order stable within each category (as written by the customer).
 - reply_text: write the WhatsApp reply we send back to the customer. Sound like a friendly human coordinator, in casual Hebrew, 1-2 short sentences, at most one emoji. Include the token {{ORDER}} exactly once (it is replaced with the order number). Examples of tone (do NOT copy verbatim, invent your own variation each time): "קיבלתי 🙌 ההזמנה יצאה לליקוט, מספר הזמנה {{ORDER}}", "מעולה, הכל נקלט! ההזמנה שלך ({{ORDER}}) כבר אצל המלקטים". For additions: acknowledge the addition and mention it joined order {{ORDER}}. Mirror the customer's energy (if they are brief - be brief).
-- EXCEPTION - company is null on an order/addition/change: reply_text must instead ASK naturally which company the order is for, listing the options, WITHOUT the {{ORDER}} token (e.g. "קיבלתי! רק לאיזו חברה ההזמנה - כרם קפיטל, טריפל או סולראדג'?").`;
+- EXCEPTION - company is null on an order/addition/change: reply_text must instead ASK naturally which company the order is for, listing the options, WITHOUT the {{ORDER}} token (e.g. "קיבלתי! רק לאיזו חברה ההזמנה - כרם קפיטל, טריפל או סולראדג'?").\n- Complaints: if the customer complains about a past order ("פעם שעברה הגיע לא טוב", "שכחתם את...", "איחרתם במשלוח") set complaint accordingly, and open reply_text with a short empathetic acknowledgement (התנצלות קצרה + זה הועבר לטיפול) before the order confirmation.`;
 
 /**
  * Parse a raw WhatsApp message into a structured order.
@@ -140,7 +146,7 @@ async function parseOrderMessage(messageText, now = new Date()) {
     messages: [
       {
         role: 'user',
-        content: `Today is ${dayName}, ${todayStr} (Israel time). The sender is a representative who orders on behalf of these companies: ${config.companies.map((c) => c.name).join(' / ')}.
+        content: `Today is ${dayName}, ${todayStr} (Israel time). The sender is a representative who orders on behalf of these companies: ${config.companies.map((c) => c.name).join(' / ')}.${managerDirectives('naama') ? `\n\nADDITIONAL MANAGER DIRECTIVES (follow them):\n${managerDirectives('naama')}` : ''}
 
 WhatsApp message received:
 """

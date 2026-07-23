@@ -29,6 +29,9 @@ const config = {
   pickingGroupName: process.env.PICKING_GROUP_NAME || '',
   photosGroupName: process.env.PHOTOS_GROUP_NAME || '',
   changesCutoff: process.env.CHANGES_CUTOFF || '14:00',
+  // Triple team contact for worker escalations ("מדבר עם החבר'ה של טריפל")
+  tripleContact: normalizePhone(process.env.TRIPLE_CONTACT_NUMBER || '0548383333'),
+  tripleContactId: normalizePhone(process.env.TRIPLE_CONTACT_NUMBER || '0548383333') + '@c.us',
   // WhatsApp Web is pinned to the last version compatible with whatsapp-web.js
   // 1.34.x — the 2.3000.1043xxx rollout (July 2026) broke the library's
   // injection (window.Store never gets built). Override via WWEB_VERSION once

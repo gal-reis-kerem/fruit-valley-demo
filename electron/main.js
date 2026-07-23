@@ -140,6 +140,17 @@ ipcMain.handle('open-portal', () => {
   const { portalUrl } = readSettings();
   if (portalUrl) shell.openExternal(portalUrl);
 });
+ipcMain.handle('get-stats-full', () => engine.getStatsFull());
+ipcMain.handle('get-complaints', () => engine.getComplaints());
+ipcMain.handle('get-rules', (e, workerId) => engine.getRules(workerId));
+ipcMain.handle('worker-chat', async (e, worker, history) => {
+  try {
+    return await engine.chatWithWorker(worker, history);
+  } catch (err) {
+    log.error('צ׳אט עובד נכשל:', err.message);
+    return { reply: 'מצטער/ת, משהו השתבש אצלי - נסו שוב עוד רגע.', action: 'none' };
+  }
+});
 ipcMain.handle('open-customers-folder', () => shell.openPath(config.outputDir));
 ipcMain.handle('open-path', (e, p) => {
   // only paths inside the output folder may be opened from the UI

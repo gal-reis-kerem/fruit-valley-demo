@@ -9,6 +9,11 @@ const { startWebServer } = require('./web/server');
 const { readSettings } = require('./settings');
 const sheets = require('./crm/sheets');
 const store = require('./orders/store');
+const rules = require('./rules');
+const complaintsStore = require('./complaints');
+const statsMod = require('./stats');
+const { workerChat } = require('./ai/workerChat');
+const { sendAndConfirm } = require('./whatsapp/client');
 
 // A single failed operation must not kill the whole digital worker (NFR-07)
 process.on('unhandledRejection', (err) => log.error('שגיאה לא מטופלת:', err));
@@ -248,8 +253,50 @@ async function start({ cli = false, webPanel = true } = {}) {
 function getStats() {
   return store.todayStats(store.loadDB());
 }
+
+function getStatsFull() {
+  return statsMod.fullStats(config.companies);
+}
+
+function getComplaints() {
+  return complaintsStore.list();
+}
+
+function getRules(workerId) {
+  return rules.readRules(workerId);
+}
+
+// Manager <-> worker chat: answer in character, adopt rules, escalate to the
+// Triple team over WhatsApp when out of scope.
+async function chatWithWorker(worker, history) {
+  const rulebook = rules.readRules(worker.id) || '(אין עדיין ספר חוקים)';
+  const result = await workerChat(worker, rulebook, history);
+  const busLine = worker.id === 'naama' ? bus.naama : bus.yuval;
+
+  if (result.action === 'add_rule' && result.rule_text) {
+    rules.addManagerRule(worker.id, result.rule_text);
+    busLine(`עדכנתי את ספר החוקים שלי: ${result.rule_text}`);
+  }
+
+  if (result.action === 'escalate' && result.escalation_text) {
+    const text =
+      `🔔 הודעה מ${worker.name} (העובד/ת הדיגיטלי/ת של פירות העמק):
+` +
+      `המנהל העלה נושא שדורש את צוות Triple:
+"${result.escalation_text}"`;
+    if (state.client && state.state === 'connected') {
+      const sent = await sendAndConfirm(state.client, config.tripleContactId, text).catch(() => null);
+      busLine(sent ? 'שלחתי הודעה לצוות Triple בוואטסאפ' : 'לא הצלחתי לשלוח לצוות Triple - אנסה שוב מאוחר יותר');
+      result.escalated = Boolean(sent);
+    } else {
+      busLine('אשלח לצוות Triple ברגע שחיבור הוואטסאפ יחזור');
+      result.escalated = false;
+    }
+  }
+  return result;
+}
 function getCustomers(date) {
   return store.customersOverview(store.loadDB(), config.companies, date);
 }
 
-module.exports = { start, startWhatsApp, stopWhatsApp, state, bus, getStats, getCustomers, config };
+module.exports = { start, startWhatsApp, stopWhatsApp, state, bus, getStats, getStatsFull, getComplaints, getRules, chatWithWorker, getCustomers, config };

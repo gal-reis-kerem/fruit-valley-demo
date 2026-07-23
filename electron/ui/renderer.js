@@ -309,13 +309,21 @@ async function refreshCustomers() {
       const last = document.createElement('td');
       last.textContent = r.lastOrderId ? `${r.lastOrderId} · גרסה ${r.lastVersion}` : '—';
       if (!r.lastOrderId) last.className = 'muted';
+      const changes = document.createElement('td');
+      if (r.postPrintChanges && r.postPrintChanges.length) {
+        changes.className = 'changes-cell';
+        changes.textContent = r.postPrintChanges.join(' | ');
+      } else {
+        changes.textContent = '—';
+        changes.className = 'muted';
+      }
       const pdf = document.createElement('td');
       if (r.lastPdf) pdf.appendChild(pdfLinkEl(r));
       else {
         pdf.textContent = '—';
         pdf.className = 'muted';
       }
-      tr.append(name, status, last, pdf);
+      tr.append(name, status, last, changes, pdf);
       body.appendChild(tr);
     }
 
@@ -362,6 +370,110 @@ function enterDashboard(saveSelection) {
   if (saveSelection) api.saveWorkers(WORKERS.filter((w) => w.active).map((w) => w.id));
   go('dash');
   refreshCustomers();
+}
+
+// ---------- worker chat ----------
+const chatHistories = { naama: [], yuval: [] };
+let chatWorkerId = null;
+
+function chatBubble(kind, text) {
+  const msgs = document.getElementById('chat-msgs');
+  const div = document.createElement('div');
+  div.className = `bubble ${kind}`;
+  div.textContent = text;
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+  return div;
+}
+
+function openChat(workerId) {
+  chatWorkerId = workerId;
+  const w = WORKERS.find((x) => x.id === workerId);
+  document.getElementById('chat-avatar').innerHTML = avatarSvg({ ...w.avatar, size: 40 });
+  document.getElementById('chat-name').textContent = `${w.name} · ${w.role}`;
+  const msgs = document.getElementById('chat-msgs');
+  msgs.innerHTML = '';
+  if (!chatHistories[workerId].length) {
+    chatBubble('worker', `היי! כאן ${w.name}. אפשר לשאול אותי על העבודה שלי, להעיר, או לעדכן אותי בהנחיות חדשות.`);
+  } else {
+    for (const m of chatHistories[workerId]) chatBubble(m.role === 'user' ? 'me' : 'worker', m.content);
+  }
+  document.getElementById('chat-modal').classList.add('visible');
+  document.getElementById('chat-text').focus();
+}
+
+async function sendChat() {
+  const input = document.getElementById('chat-text');
+  const text = input.value.trim();
+  if (!text || !chatWorkerId) return;
+  const w = WORKERS.find((x) => x.id === chatWorkerId);
+  input.value = '';
+  chatHistories[chatWorkerId].push({ role: 'user', content: text });
+  chatBubble('me', text);
+  const typing = chatBubble('worker', '…');
+  document.getElementById('chat-send').disabled = true;
+  const res = await api.workerChat({ id: w.id, name: w.name, role: w.role }, chatHistories[chatWorkerId]);
+  document.getElementById('chat-send').disabled = false;
+  typing.remove();
+  chatHistories[chatWorkerId].push({ role: 'assistant', content: res.reply });
+  chatBubble('worker', res.reply);
+  if (res.action === 'add_rule' && res.rule_text) chatBubble('note', `נוסף לספר החוקים: ${res.rule_text}`);
+  if (res.action === 'escalate') chatBubble('note', res.escalated ? 'נשלחה הודעה לצוות Triple בוואטסאפ' : 'יועבר לצוות Triple כשהחיבור יתאפשר');
+}
+
+async function openRules() {
+  if (!chatWorkerId) return;
+  const w = WORKERS.find((x) => x.id === chatWorkerId);
+  const content = await api.getRules(chatWorkerId);
+  document.getElementById('rules-title').textContent = `ספר החוקים של ${w.name}`;
+  document.getElementById('rules-body').textContent = content || '(עדיין ריק)';
+  document.getElementById('rules-modal').classList.add('visible');
+}
+
+// ---------- stats page ----------
+async function openStats() {
+  const { totals, perCustomer } = await api.getStatsFull();
+  const cards = [
+    [totals.orders, 'הזמנות סה"כ'],
+    [totals.avgItems ?? '—', 'ממוצע פריטים להזמנה'],
+    [totals.avgOrderHour ?? '—', 'שעת הזמנה ממוצעת'],
+    [totals.postPrintChanges, 'שינויים אחרי הדפסה'],
+  ];
+  document.getElementById('stat-cards').innerHTML = cards
+    .map(([v, l]) => `<div class="stat-card"><b>${v}</b><span>${l}</span></div>`)
+    .join('');
+  const body = document.getElementById('stats-body');
+  body.innerHTML = '';
+  for (const r of perCustomer) {
+    const tr = document.createElement('tr');
+    for (const val of [r.name, r.orders, r.avgItems ?? '—', r.avgOrderHour ?? '—', r.totalChanges, r.postPrintChanges, r.avgVersions ?? '—', r.documentedPct == null ? '—' : r.documentedPct + '%']) {
+      const td = document.createElement('td');
+      td.textContent = val;
+      tr.appendChild(td);
+    }
+    body.appendChild(tr);
+  }
+  document.getElementById('stats-page').classList.add('visible');
+}
+
+// ---------- complaints page ----------
+async function openComplaints() {
+  const list = await api.getComplaints();
+  const body = document.getElementById('complaints-body');
+  body.innerHTML = '';
+  document.getElementById('complaints-empty').style.display = list.length ? 'none' : 'block';
+  for (const c of list) {
+    const tr = document.createElement('tr');
+    const when = document.createElement('td');
+    when.textContent = new Date(c.ts).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+    const who = document.createElement('td');
+    who.textContent = c.company || 'לא זוהה';
+    const what = document.createElement('td');
+    what.textContent = c.text;
+    tr.append(when, who, what);
+    body.appendChild(tr);
+  }
+  document.getElementById('complaints-page').classList.add('visible');
 }
 
 // ---------- boot ----------

@@ -187,6 +187,53 @@
   }
   .folder-link svg { width: 18px; height: 18px; fill: var(--yellow); }
 
+  /* worker chat */
+  .chat-btn {
+    width: 34px; height: 34px; border-radius: 50%; border: 2px solid #EDE7D4; background: #fff;
+    color: var(--green); cursor: pointer; display: flex; align-items: center; justify-content: center;
+    margin-inline-start: 8px; flex-shrink: 0;
+  }
+  .chat-btn svg { width: 17px; height: 17px; }
+  .chat-btn:hover { border-color: var(--green); }
+  .chat-modal { max-width: 520px; width: 92%; text-align: right; padding: 0; overflow: hidden; }
+  .chat-head { display: flex; align-items: center; gap: 10px; padding: 14px 18px; background: #FCFAF2; border-bottom: 1px solid #F0EBDB; }
+  .chat-head .avatar-svg { width: 40px !important; height: 40px !important; margin: 0; }
+  .chat-head b { font-size: 15px; }
+  .chat-head .rules-link { margin-inline-start: auto; font-size: 12px; color: var(--green); font-weight: 700; cursor: pointer; text-decoration: underline; background: none; border: 0; }
+  .chat-head .x { background: none; border: 0; font-size: 18px; color: #8b877a; cursor: pointer; margin-inline-start: 8px; }
+  .chat-msgs { height: 330px; overflow-y: auto; padding: 16px; background: #FAF6EC; display: flex; flex-direction: column; gap: 8px; }
+  .bubble { max-width: 82%; padding: 9px 13px; border-radius: 14px; font-size: 13.5px; line-height: 1.6; }
+  .bubble.me { align-self: flex-start; background: var(--green); color: #fff; border-bottom-left-radius: 4px; }
+  .bubble.worker { align-self: flex-end; background: #fff; border-bottom-right-radius: 4px; box-shadow: 0 1px 4px rgba(36,48,31,.08); }
+  .bubble.note { align-self: center; background: var(--yellow-soft); color: #5c4d0a; font-size: 12px; font-weight: 700; border-radius: 999px; padding: 5px 14px; }
+  .chat-input { display: flex; gap: 8px; padding: 12px 14px; background: #fff; border-top: 1px solid #F0EBDB; }
+  .chat-input input { flex: 1; border: 2px solid #E2DCC8; border-radius: 10px; padding: 9px 12px; font-size: 14px; font-family: inherit; background: #FFFDF6; user-select: text; text-align: right; direction: rtl; margin: 0; }
+  .chat-input button { background: var(--green); color: #fff; border: 0; border-radius: 10px; padding: 9px 20px; font-weight: 700; cursor: pointer; }
+  .chat-input button:disabled { opacity: .5; }
+
+  /* rules modal */
+  .rules-modal { max-width: 560px; width: 92%; text-align: right; }
+  .rules-modal pre { white-space: pre-wrap; font-family: inherit; font-size: 13px; line-height: 1.8; color: #4a5242; max-height: 420px; overflow-y: auto; text-align: right; background: #FCFAF2; border-radius: 10px; padding: 14px; }
+
+  /* overlay pages (stats / complaints) */
+  .page-overlay { position: fixed; inset: 0; background: var(--cream); z-index: 150; display: none; flex-direction: column; }
+  .page-overlay.visible { display: flex; }
+  .page-overlay .page-head { display: flex; align-items: center; gap: 12px; padding: 14px 26px; background: #fff; border-bottom: 3px solid var(--yellow); }
+  .page-overlay .page-head h2 { color: var(--green-dark); font-size: 18px; }
+  .page-overlay .back-btn { margin-inline-start: auto; border: 2px solid #EDE7D4; background: #fff; border-radius: 999px; padding: 6px 18px; font-weight: 700; color: #6b7361; cursor: pointer; }
+  .page-body { flex: 1; overflow-y: auto; padding: 22px 26px; }
+  .stat-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 20px; }
+  .stat-card { background: #fff; border-radius: 14px; padding: 16px; text-align: center; box-shadow: 0 4px 16px rgba(36,48,31,.08); }
+  .stat-card b { display: block; font-size: 26px; color: var(--green-dark); }
+  .stat-card span { font-size: 12.5px; color: #6b7361; }
+  .panel { background: #fff; border-radius: 14px; box-shadow: 0 4px 16px rgba(36,48,31,.08); overflow: hidden; }
+  table.stats-t { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  table.stats-t th { text-align: right; font-size: 12px; color: #A39F8C; padding: 9px 16px; background: #FCFAF2; border-bottom: 1px solid #F0EBDB; }
+  table.stats-t td { padding: 10px 16px; border-bottom: 1px solid #F7F3E6; }
+  table.stats-t tr:last-child td { border-bottom: 0; }
+  .changes-cell { font-size: 12px; color: #8a4a00; line-height: 1.6; max-width: 260px; }
+  .empty-note { text-align: center; color: #8b877a; padding: 40px 0; font-size: 14.5px; }
+
   .modal-back { position: fixed; inset: 0; background: rgba(36,48,31,.45); display: none; align-items: center; justify-content: center; z-index: 200; }
   .modal-back.visible { display: flex; }
   .modal { background: #fff; border-radius: 18px; padding: 30px 36px; text-align: center; max-width: 430px; }
@@ -304,6 +351,7 @@
           <span id="ava-naama"></span>
           <div class="who"><b>נעמה</b><span>סידור הזמנות וקשרי לקוחות</span></div>
           <div class="busy" id="naama-busy">זמינה</div>
+          <button class="chat-btn" onclick="openChat('naama')" title="שיחה עם נעמה"><svg viewBox="0 0 24 24"><path d="M4 4h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H9l-5 4V6a2 2 0 0 1 2-2z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg></button>
         </div>
         <div class="terminal" id="naama-term"></div>
       </div>
@@ -312,6 +360,7 @@
           <span id="ava-yuval"></span>
           <div class="who"><b>יובל</b><span>הכנת מסמכים וקשר מלקטים</span></div>
           <div class="busy" id="yuval-busy">זמין</div>
+          <button class="chat-btn" onclick="openChat('yuval')" title="שיחה עם יובל"><svg viewBox="0 0 24 24"><path d="M4 4h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H9l-5 4V6a2 2 0 0 1 2-2z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg></button>
         </div>
         <div class="terminal" id="yuval-term"></div>
       </div>
@@ -334,7 +383,7 @@
         </div>
       </div>
       <table class="cust" id="cust-table">
-        <thead><tr><th>לקוח</th><th>שלב</th><th>הזמנה</th><th>קובץ עדכני</th></tr></thead>
+        <thead><tr><th>לקוח</th><th>שלב</th><th>הזמנה</th><th>שינויים אחרי הדפסה</th><th>קובץ עדכני</th></tr></thead>
         <tbody id="cust-body"></tbody>
       </table>
       <div class="kanban" id="kanban"></div>
@@ -344,6 +393,14 @@
       <button class="folder-link" onclick="api.openCustomersFolder()">
         <svg viewBox="0 0 24 24"><path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/></svg>
         תיקיית הלקוחות
+      </button>
+      <button class="folder-link" onclick="openStats()">
+        <svg viewBox="0 0 24 24"><rect x="4" y="12" width="4" height="8" rx="1"/><rect x="10" y="7" width="4" height="13" rx="1"/><rect x="16" y="3" width="4" height="17" rx="1"/></svg>
+        דף סטטיסטיקות
+      </button>
+      <button class="folder-link" onclick="openComplaints()">
+        <svg viewBox="0 0 24 24"><path d="M12 3 2 21h20L12 3z"/><rect x="11" y="10" width="2" height="5" fill="#fff"/><rect x="11" y="16.5" width="2" height="2" fill="#fff"/></svg>
+        תלונות
       </button>
     </div>
   </div>
@@ -356,6 +413,69 @@
     <div class="qr-box" id="repair-qr"></div>
   </div>
 </div>
+
+<!-- worker chat -->
+<div class="modal-back" id="chat-modal">
+  <div class="modal chat-modal">
+    <div class="chat-head">
+      <span id="chat-avatar"></span>
+      <b id="chat-name"></b>
+      <button class="rules-link" onclick="openRules()">ספר החוקים</button>
+      <button class="x" onclick="document.getElementById('chat-modal').classList.remove('visible')">✕</button>
+    </div>
+    <div class="chat-msgs" id="chat-msgs"></div>
+    <div class="chat-input">
+      <input id="chat-text" placeholder="כתבו הודעה…" onkeydown="if(event.key==='Enter')sendChat()">
+      <button id="chat-send" onclick="sendChat()">שליחה</button>
+    </div>
+  </div>
+</div>
+
+<!-- rulebook -->
+<div class="modal-back" id="rules-modal">
+  <div class="modal rules-modal">
+    <h3 id="rules-title"></h3>
+    <pre id="rules-body"></pre>
+    <button class="close-btn" onclick="document.getElementById('rules-modal').classList.remove('visible')">סגירה</button>
+  </div>
+</div>
+
+<!-- stats page -->
+<section class="page-overlay" id="stats-page">
+  <div class="page-head">
+    <h2>דף סטטיסטיקות</h2>
+    <button class="back-btn" onclick="document.getElementById('stats-page').classList.remove('visible')">חזרה לדשבורד</button>
+  </div>
+  <div class="page-body">
+    <div class="stat-cards" id="stat-cards"></div>
+    <div class="panel">
+      <table class="stats-t">
+        <thead><tr>
+          <th>לקוח</th><th>הזמנות</th><th>ממוצע פריטים</th><th>שעת הזמנה ממוצעת</th>
+          <th>שינויים בהזמנות</th><th>שינויים אחרי הדפסה</th><th>ממוצע גרסאות</th><th>% תיעוד מלא</th>
+        </tr></thead>
+        <tbody id="stats-body"></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- complaints page -->
+<section class="page-overlay" id="complaints-page">
+  <div class="page-head">
+    <h2>תלונות — 14 הימים האחרונים</h2>
+    <button class="back-btn" onclick="document.getElementById('complaints-page').classList.remove('visible')">חזרה לדשבורד</button>
+  </div>
+  <div class="page-body">
+    <div class="panel">
+      <table class="stats-t">
+        <thead><tr><th>מתי</th><th>לקוח</th><th>התלונה</th></tr></thead>
+        <tbody id="complaints-body"></tbody>
+      </table>
+      <div class="empty-note" id="complaints-empty" style="display:none">אין תלונות ב-14 הימים האחרונים</div>
+    </div>
+  </div>
+</section>
 
 <div class="modal-back" id="info-modal">
   <div class="modal">
