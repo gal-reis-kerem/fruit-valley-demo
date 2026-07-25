@@ -3,24 +3,32 @@ const puppeteer = require('puppeteer');
 const { buildPickingSheetHTML } = require('./template');
 const { customerDir, orderFileBase } = require('../orders/store');
 const { config } = require('../config');
+const log = require('../logger');
 
+// Singleton browser for PDF rendering. It can die behind our back (crash,
+// cleanup kills, OS pressure) — never trust the cached promise: verify the
+// connection and relaunch when needed.
 let browserPromise = null;
 
-function getBrowser() {
-  if (!browserPromise) {
-    browserPromise = puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    });
+async function getBrowser() {
+  if (browserPromise) {
+    const existing = await browserPromise.catch(() => null);
+    if (existing && existing.connected) return existing;
+    browserPromise = null;
+    log.warn('דפדפן ה-PDF נסגר - מפעיל חדש');
   }
-  return browserPromise;
+  browserPromise = puppeteer.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+  });
+  const browser = await browserPromise;
+  browser.on('disconnected', () => {
+    browserPromise = null;
+  });
+  return browser;
 }
 
-/**
- * Render the picking sheet for an order to a PDF file.
- * @returns {Promise<string>} absolute path of the generated PDF
- */
-async function generatePickingSheetPDF(order) {
+async function renderOnce(order) {
   const browser = await getBrowser();
   const page = await browser.newPage();
   try {
@@ -36,14 +44,29 @@ async function generatePickingSheetPDF(order) {
     });
     return pdfPath;
   } finally {
-    await page.close();
+    await page.close().catch(() => {});
+  }
+}
+
+/**
+ * Render the picking sheet for an order to a PDF file.
+ * One automatic retry with a fresh browser if the first attempt fails.
+ * @returns {Promise<string>} absolute path of the generated PDF
+ */
+async function generatePickingSheetPDF(order) {
+  try {
+    return await renderOnce(order);
+  } catch (err) {
+    log.warn(`הפקת PDF נכשלה (${err.message}) - מנסה שוב עם דפדפן חדש`);
+    browserPromise = null;
+    return renderOnce(order);
   }
 }
 
 async function closeBrowser() {
   if (browserPromise) {
-    const browser = await browserPromise;
-    await browser.close();
+    const browser = await browserPromise.catch(() => null);
+    if (browser) await browser.close().catch(() => {});
     browserPromise = null;
   }
 }

@@ -123,8 +123,8 @@ async function launchClient(attempt) {
     }
     if (state.state === 'qr') return; // human is scanning - keep waiting
     clearInterval(watchdog);
-    relaunch('החיבור נתקע (לא הבשיל תוך 90 שניות)');
-  }, 90000);
+    relaunch('החיבור נתקע (לא הבשיל תוך דקה)');
+  }, 60000);
 
   client.on('qr', (qr) => {
     state.qr = qr;

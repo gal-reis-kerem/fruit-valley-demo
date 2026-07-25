@@ -56,7 +56,7 @@ async function createWhatsAppClient() {
       });
       if (clicked) log.info(`נסגר דיאלוג חוסם של וואטסאפ ("${clicked}")`);
     } catch (err) { /* page not up yet - keep polling */ }
-  }, 4000);
+  }, 2500);
   // keep a short grace period after ready (the dialog can pop late)
   client.on('ready', () => setTimeout(() => clearInterval(dismisser), 45000));
   client.on('disconnected', () => clearInterval(dismisser));
