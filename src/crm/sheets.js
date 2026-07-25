@@ -62,6 +62,31 @@ function initialsFor(nameEn, taken) {
   return candidate;
 }
 
+// Well-known brands keep their canonical Latin names/initials even when the
+// sheet doesn't provide them.
+const KNOWN_BRANDS = {
+  'כרם קפיטל': { nameEn: 'Kerem Capital', initials: 'KC' },
+  'טריפל': { nameEn: 'Triple', initials: 'TR' },
+  "סולראדג'": { nameEn: 'Solar-edge', initials: 'SE' },
+};
+
+// normalize Hebrew geresh/gershayim to plain quotes for matching
+const normName = (s) => String(s || '').replace(/[׳’]/g, "'").replace(/[״]/g, '"').trim();
+
+// Latin initials for Hebrew company names (fallback when no initials column)
+const HEB2LAT = { א: 'A', ב: 'B', ג: 'G', ד: 'D', ה: 'H', ו: 'V', ז: 'Z', ח: 'H', ט: 'T', י: 'Y', כ: 'K', ך: 'K', ל: 'L', מ: 'M', ם: 'M', נ: 'N', ן: 'N', ס: 'S', ע: 'A', פ: 'P', ף: 'P', צ: 'Z', ץ: 'Z', ק: 'K', ר: 'R', ש: 'S', ת: 'T' };
+
+function hebInitials(name, taken) {
+  const words = normName(name).split(/\s+/).filter(Boolean);
+  const letters = words.length >= 2 ? [words[0][0], words[1][0]] : [...(words[0] || 'XX')].slice(0, 2);
+  let base = letters.map((ch) => HEB2LAT[ch] || (/[a-zA-Z]/.test(ch) ? ch.toUpperCase() : 'X')).join('');
+  if (base.length < 2) base = (base + 'X').slice(0, 2);
+  let candidate = base, n = 2;
+  while (taken.has(candidate)) candidate = base + n++;
+  taken.add(candidate);
+  return candidate;
+}
+
 async function fetchCompanies(sheetUrl) {
   const url = csvUrlFrom(sheetUrl);
   if (!url) throw new Error('כתובת גיליון לא תקינה');
@@ -70,28 +95,74 @@ async function fetchCompanies(sheetUrl) {
   const rows = parseCsv(await res.text());
   if (rows.length < 2) throw new Error('הגיליון ריק או חסרה שורת כותרות');
 
-  const headers = rows[0].map((h) => h.trim());
-  const nameCol = findCol(headers, 'שםהלקוח', 'לקוח', 'חברה', 'name');
+  // The header row is not necessarily the first row (title rows above are
+  // fine) — scan the first rows for one that contains recognizable headers.
+  let headerIdx = -1;
+  for (let i = 0; i < Math.min(rows.length, 6); i++) {
+    const headers = rows[i].map((h) => h.trim());
+    if (
+      findCol(headers, 'שםלקוח', 'שםהלקוח', 'לקוח', 'אישקשר', 'שם', 'name') >= 0 &&
+      findCol(headers, 'משרד', 'חברה', 'חברות', 'טלפון', 'וואטסאפ', 'phone') >= 0
+    ) {
+      headerIdx = i;
+      break;
+    }
+  }
+  if (headerIdx < 0) {
+    throw new Error('לא נמצאה שורת כותרות. נדרשות עמודות: שם (איש קשר או לקוח), משרד/חברה, טלפון');
+  }
+  const headers = rows[headerIdx].map((h) => h.trim());
+  const dataRows = rows.slice(headerIdx + 1);
+
+  const nameCol = findCol(headers, 'שםלקוח', 'שםהלקוח', 'לקוח', 'אישקשר', 'שם', 'name');
+  const officeCol = findCol(headers, 'משרד', 'חברה', 'חברות', 'company');
+  const phoneCol = findCol(headers, 'וואטסאפ', 'ווצאפ', 'טלפון', 'נייד', 'phone', 'whatsapp');
   const enCol = findCol(headers, 'אנגלית', 'english');
   const initialsCol = findCol(headers, 'ראשי', 'initials');
-  const phoneCol = findCol(headers, 'וואטסאפ', 'ווצאפ', 'טלפון', 'phone', 'whatsapp');
-  if (nameCol < 0) throw new Error('לא נמצאה עמודת "שם הלקוח" בגיליון');
 
   const taken = new Set();
-  const companies = [];
-  for (const row of rows.slice(1)) {
-    const name = (row[nameCol] || '').trim();
-    if (!name) continue;
-    const nameEn = ((enCol >= 0 && row[enCol]) || name).trim();
-    const explicitInitials = (initialsCol >= 0 && (row[initialsCol] || '').trim().toUpperCase()) || null;
-    const initials = explicitInitials && !taken.has(explicitInitials)
-      ? (taken.add(explicitInitials), explicitInitials)
-      : initialsFor(nameEn, taken);
-    const contacts = phoneCol >= 0
+  const byName = new Map(); // normalized company name -> company object
+
+  const getCompany = (rawName, rowEn, rowInitials) => {
+    const name = normName(rawName);
+    if (!name) return null;
+    if (byName.has(name)) return byName.get(name);
+    const known = KNOWN_BRANDS[name];
+    const nameEn = (known && known.nameEn) || (rowEn && rowEn.trim()) || name;
+    let initials = (known && known.initials) || (rowInitials && rowInitials.trim().toUpperCase()) || null;
+    if (initials && taken.has(initials)) initials = null;
+    if (initials) taken.add(initials);
+    else initials = hebInitials(nameEn, taken);
+    const company = { name, nameEn, initials, aliases: [], contacts: [] };
+    byName.set(name, company);
+    return company;
+  };
+
+  for (const row of dataRows) {
+    const phones = phoneCol >= 0
       ? (row[phoneCol] || '').split(/[,;/]+/).map((p) => normalizePhone(p)).filter((p) => p.length >= 11)
       : [];
-    companies.push({ name, nameEn, initials, aliases: [], contacts });
+    const rowEn = enCol >= 0 ? row[enCol] : null;
+    const rowInitials = initialsCol >= 0 ? row[initialsCol] : null;
+
+    // Two supported layouts:
+    //  contact-centric: name = contact person, משרד = their company/companies
+    //  company-centric: name = the company itself
+    const companyNames =
+      officeCol >= 0 && officeCol !== nameCol && (row[officeCol] || '').trim()
+        ? row[officeCol].split(/[,;/]+/)
+        : [row[nameCol]];
+
+    for (const raw of companyNames) {
+      const company = getCompany(raw, rowEn, rowInitials);
+      if (!company) continue;
+      for (const phone of phones) {
+        if (!company.contacts.includes(phone)) company.contacts.push(phone);
+      }
+    }
   }
+
+  const companies = [...byName.values()];
   if (!companies.length) throw new Error('לא נמצאו לקוחות בגיליון');
   return companies;
 }
