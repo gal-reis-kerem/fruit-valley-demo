@@ -166,11 +166,11 @@ const WA_LABEL = {
   connected: 'וואטסאפ', starting: 'וואטסאפ: מתחבר…', qr: 'וואטסאפ: סרקו קוד',
   disconnected: 'וואטסאפ: מנותק', stopped: 'וואטסאפ: כבוי', error: 'וואטסאפ: שגיאה',
 };
-function chip(label, cls, onclick) {
+function chip(label, cls, kind) {
   const b = document.createElement('button');
   b.className = 'chip ' + cls;
   b.innerHTML = `<span class="led"></span>${label}`;
-  if (onclick && cls === 'down') b.onclick = onclick;
+  if (cls === 'down') b.onclick = () => openRepair(kind);
   else b.disabled = true;
   b.style.pointerEvents = cls === 'down' ? 'auto' : 'none';
   return b;
@@ -186,10 +186,7 @@ function applyConn(conn) {
   wrap.appendChild(chip(
     WA_LABEL[wa] || wa,
     wa === 'connected' ? 'ok' : wa === 'starting' ? 'warn' : 'down',
-    () => {
-      if (wa === 'qr') document.getElementById('repair-modal').classList.add('visible');
-      else api.reconnectWhatsapp();
-    },
+    'whatsapp',
   ));
 
   const crm = conn.crm;
@@ -197,7 +194,7 @@ function applyConn(conn) {
   wrap.appendChild(chip(
     !crm.configured ? 'CRM: לא חובר' : crmDown ? 'CRM: אין גישה' : 'CRM לקוחות',
     !crm.configured ? '' : crmDown ? 'down' : 'ok',
-    () => api.retryCrm(),
+    'crm',
   ));
 
   const portal = conn.portal;
@@ -205,22 +202,142 @@ function applyConn(conn) {
   wrap.appendChild(chip(
     !portal.configured ? 'פורטל: לא חובר' : portalDown ? 'פורטל: אין גישה' : 'פורטל הזמנות',
     !portal.configured ? '' : portalDown ? 'down' : 'ok',
-    () => api.retryPortal(),
+    'portal',
   ));
 
   // degraded page when a configured connection is down
   const degraded = waDown || crmDown || portalDown;
   document.getElementById('dash').classList.toggle('degraded', inDashboard && degraded);
-  document.getElementById('repair-modal').classList.toggle(
-    'visible',
-    inDashboard && wa === 'qr' && document.getElementById('repair-modal').classList.contains('visible'),
-  );
-  if (!(inDashboard && wa === 'qr')) document.getElementById('repair-modal').classList.remove('visible');
+
+  // live-refresh the repair dialog; auto-close when the connection recovers
+  if (fixKind) {
+    const fixed =
+      (fixKind === 'whatsapp' && wa === 'connected') ||
+      (fixKind === 'crm' && crm.configured && crm.ok) ||
+      (fixKind === 'portal' && portal.configured && portal.ok);
+    if (fixed) {
+      document.getElementById('fix-status').textContent = 'החיבור חזר לפעול ✓';
+      document.getElementById('fix-error').textContent = '';
+      setTimeout(closeFix, 1400);
+    } else {
+      renderFix();
+    }
+  }
+}
+
+// ---------- repair dialog ----------
+let fixKind = null;
+
+function fixAction(label, fn, primary) {
+  const b = document.createElement('button');
+  b.className = 'btn' + (primary ? '' : ' yellow');
+  b.style.cssText = 'font-size:14px;padding:9px 22px';
+  b.textContent = label;
+  b.onclick = fn;
+  return b;
+}
+
+function openRepair(kind) {
+  fixKind = kind;
+  renderFix();
+  document.getElementById('fix-modal').classList.add('visible');
+}
+
+function closeFix() {
+  fixKind = null;
+  document.getElementById('fix-modal').classList.remove('visible');
+}
+
+function renderFix() {
+  if (!fixKind || !lastConn) return;
+  const titleEl = document.getElementById('fix-title');
+  const statusEl = document.getElementById('fix-status');
+  const errorEl = document.getElementById('fix-error');
+  const tipsEl = document.getElementById('fix-tips');
+  const actionsEl = document.getElementById('fix-actions');
+  const qrEl = document.getElementById('fix-qr');
+  tipsEl.innerHTML = '';
+  actionsEl.innerHTML = '';
+  qrEl.style.display = 'none';
+
+  const addTips = (tips) => {
+    for (const t of tips) {
+      const li = document.createElement('li');
+      li.textContent = t;
+      tipsEl.appendChild(li);
+    }
+  };
+
+  if (fixKind === 'whatsapp') {
+    const wa = lastConn.whatsapp;
+    titleEl.textContent = 'תיקון חיבור הוואטסאפ';
+    statusEl.textContent = WA_LABEL[wa.state] || wa.state;
+    errorEl.textContent = wa.error || '';
+    if (wa.state === 'qr') {
+      qrEl.style.display = 'flex';
+      addTips([
+        'החיבור לטלפון של העסק פג — נדרשת סריקה מחדש.',
+        'בטלפון של העסק: וואטסאפ ← הגדרות ← מכשירים מקושרים ← קישור מכשיר, וסרקו את הקוד שמוצג כאן.',
+      ]);
+    } else {
+      addTips([
+        'ודאו שלמחשב הזה יש חיבור אינטרנט.',
+        'ודאו שהטלפון של העסק דלוק, מחובר לרשת, ושוואטסאפ נפתח בו לאחרונה.',
+        'ודאו שהתוכנה לא פתוחה פעמיים במקביל.',
+        ...(wa.error && wa.error.includes('קבוצת הליקוט')
+          ? ['שם קבוצת הליקוט לא נמצא בחשבון — בדקו את שם הקבוצה בהגדרות.']
+          : []),
+        'לחצו "התחברות מחדש" — התהליך לוקח עד חצי דקה.',
+      ]);
+      actionsEl.appendChild(fixAction('התחברות מחדש', () => {
+        statusEl.textContent = 'מתחבר מחדש… (עד חצי דקה)';
+        errorEl.textContent = '';
+        api.reconnectWhatsapp();
+      }, true));
+    }
+  }
+
+  if (fixKind === 'crm') {
+    const crm = lastConn.crm;
+    titleEl.textContent = 'תיקון חיבור טבלת הלקוחות';
+    statusEl.textContent = !crm.configured ? 'לא חובר גיליון' : crm.ok === false ? 'אין גישה לגיליון' : 'תקין';
+    errorEl.textContent = crm.error || '';
+    addTips([
+      'ודאו שהגיליון משותף: שיתוף ← "כל מי שיש לו את הקישור" ← צפייה.',
+      'ודאו שהקישור שהוזן הוא לגיליון הנכון.',
+      'פתחו את הגיליון בדפדפן וודאו שהוא נטען.',
+    ]);
+    actionsEl.appendChild(fixAction('ניסיון חוזר', async () => {
+      statusEl.textContent = 'בודק גישה לגיליון…';
+      const res = await api.retryCrm();
+      if (!res.ok) {
+        statusEl.textContent = 'עדיין אין גישה';
+        errorEl.textContent = res.error || '';
+      }
+    }, true));
+    actionsEl.appendChild(fixAction('פתיחת הגיליון', () => api.openSheet(), false));
+  }
+
+  if (fixKind === 'portal') {
+    const portal = lastConn.portal;
+    titleEl.textContent = 'תיקון חיבור פורטל ההזמנות';
+    statusEl.textContent = !portal.configured ? 'לא חובר פורטל' : portal.ok === false ? 'הפורטל לא מגיב' : 'תקין';
+    errorEl.textContent = portal.error || '';
+    addTips([
+      'ייתכן שהאתר של הפורטל לא זמין כרגע — נסו לפתוח אותו בדפדפן.',
+      'אם הכתובת השתנתה — עדכנו אותה בהגדרות.',
+    ]);
+    actionsEl.appendChild(fixAction('בדיקה חוזרת', () => {
+      statusEl.textContent = 'בודק את הפורטל…';
+      api.retryPortal();
+    }, true));
+    actionsEl.appendChild(fixAction('פתיחה בדפדפן', () => api.openPortal(), false));
+  }
 }
 
 // ---------- QR ----------
 function renderQr(dataUrl) {
-  for (const box of [document.getElementById('qr-box'), document.getElementById('repair-qr')]) {
+  for (const box of [document.getElementById('qr-box'), document.getElementById('fix-qr')]) {
     if (!box) continue;
     box.classList.remove('connected');
     box.innerHTML = dataUrl ? `<img src="${dataUrl}">` : '<div class="waiting">ממתין לקוד…</div>';

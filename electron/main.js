@@ -136,6 +136,10 @@ ipcMain.handle('retry-crm', async () => {
   }
 });
 ipcMain.handle('retry-portal', () => checkPortal());
+ipcMain.handle('open-sheet', () => {
+  const { sheetUrl } = readSettings();
+  if (sheetUrl) shell.openExternal(sheetUrl);
+});
 ipcMain.handle('open-portal', () => {
   const { portalUrl } = readSettings();
   if (portalUrl) shell.openExternal(portalUrl);

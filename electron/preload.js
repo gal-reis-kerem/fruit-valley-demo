@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('api', {
   retryCrm: () => ipcRenderer.invoke('retry-crm'),
   retryPortal: () => ipcRenderer.invoke('retry-portal'),
   openPortal: () => ipcRenderer.invoke('open-portal'),
+  openSheet: () => ipcRenderer.invoke('open-sheet'),
   getStatsFull: () => ipcRenderer.invoke('get-stats-full'),
   getComplaints: () => ipcRenderer.invoke('get-complaints'),
   getRules: (workerId) => ipcRenderer.invoke('get-rules', workerId),

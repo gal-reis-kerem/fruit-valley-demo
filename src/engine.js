@@ -21,6 +21,58 @@ process.on('unhandledRejection', (err) => log.error('שגיאה לא מטופל�
 const state = { client: null, state: 'stopped', running: false, qr: null, error: null, flow: null };
 let exitOnError = true;
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// destroy can hang when the page is zombied - never wait more than 10s
+async function destroyClient(client) {
+  await Promise.race([client.destroy(), sleep(10000)]).catch(() => {});
+}
+
+// A crashed Chrome can keep holding the profile lock ("browser is already
+// running"). Kill any process bound to our session profile and remove the
+// stale lock files, then a fresh launch succeeds.
+function killZombieBrowser() {
+  try {
+    require('child_process').execSync(`pkill -9 -f "${config.authDir}"`, { stdio: 'ignore' });
+  } catch (err) { /* nothing to kill */ }
+}
+
+function clearProfileLocks() {
+  const fs = require('fs');
+  const path = require('path');
+  for (const f of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+    try {
+      fs.rmSync(path.join(config.authDir, 'session', f), { force: true });
+    } catch (err) { /* ignore */ }
+  }
+}
+
+// launch with automatic recovery from a locked profile; on final failure the
+// engine lands in a clean 'error' state that the repair dialog can restart.
+async function launchSafe(attempt) {
+  try {
+    await launchClient(attempt);
+  } catch (err) {
+    if (/already running/i.test(String(err.message))) {
+      log.warn('פרופיל הדפדפן עדיין נעול משיחה קודמת - מנקה ומנסה שוב…');
+      killZombieBrowser();
+      await sleep(3000);
+      clearProfileLocks();
+      try {
+        await launchClient(attempt);
+        return;
+      } catch (err2) {
+        err = err2;
+      }
+    }
+    state.running = false;
+    state.client = null;
+    state.error = `החיבור לא הצליח לעלות: ${err.message}`;
+    setState('error');
+    log.error('העלאת החיבור נכשלה:', err.message);
+  }
+}
+
 function setState(next) {
   state.state = next;
   bus.emit('status', { state: next, error: state.error });
@@ -36,7 +88,8 @@ function fatal(message) {
 async function startWhatsApp() {
   if (state.running) return;
   state.running = true;
-  await launchClient(1);
+  state.error = null;
+  await launchSafe(1);
 }
 
 // Self-healing launcher: stall watchdog + auto-reconnect (see git history).
@@ -50,9 +103,7 @@ async function launchClient(attempt) {
 
   const relaunch = async (reason) => {
     if (!state.running || state.client !== client) return;
-    try {
-      await client.destroy();
-    } catch (err) { /* already dead */ }
+    await destroyClient(client);
     state.client = null;
     if (attempt >= 3) {
       state.running = false;
@@ -61,7 +112,8 @@ async function launchClient(attempt) {
       return;
     }
     log.warn(`${reason} - מפעיל מחדש את החיבור (ניסיון ${attempt + 1}/3)…`);
-    launchClient(attempt + 1).catch((err) => log.error('הפעלה מחדש נכשלה:', err.message));
+    await sleep(5000); // let Chrome release the profile lock
+    await launchSafe(attempt + 1);
   };
 
   const watchdog = setInterval(() => {
@@ -119,6 +171,7 @@ async function launchClient(attempt) {
 
     const flow = new Orchestrator(client, { pickingGroup, photosGroup });
     state.flow = flow;
+    state.error = null;
     log.info(`קבוצת ליקוט: "${pickingGroup.name}"${photosGroup ? ` | קבוצת תמונות: "${photosGroup.name}"` : ''}`);
     setState('connected');
     log.info('ממתין להזמנות… 🍎');
@@ -198,12 +251,9 @@ async function launchClient(attempt) {
 }
 
 async function stopWhatsApp() {
-  if (!state.client) return;
-  log.info('עוצר את חיבור הוואטסאפ (הסשן נשמר - לא יידרש QR מחדש)…');
-  try {
-    await state.client.destroy();
-  } catch (err) {
-    log.warn('עצירה לא נקייה:', err.message);
+  if (state.client) {
+    log.info('עוצר את חיבור הוואטסאפ (הסשן נשמר - לא יידרש QR מחדש)…');
+    await destroyClient(state.client);
   }
   state.client = null;
   state.running = false;
