@@ -492,46 +492,151 @@ class Orchestrator {
     bus.yuval(`מלקט סימן ${reaction.reaction} — הדף הודפס והליקוט התחיל · ${order.id}`);
   }
 
-  // ---------- Step 8: photos -> attached to the order ----------
+  // ---------- Step 8: photos -> the order becomes "picked" ----------
+  // One shipment photo is enough to mark the order picked. Attribution:
+  // reply-quote first; a single open order second; otherwise we ask in the
+  // group and wait for a text answer.
+  openPhotoOrders() {
+    return this.db.orders
+      .filter((o) => ['sent_to_group', 'awaiting_photos', 'picking', 'documented'].includes(o.status))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
   async handleGroupMedia(msg) {
     this.reload();
     if (!msg.hasMedia) return;
 
-    // Prefer explicit attribution: a reply to the photo request / PDF message.
+    // 1) reply-quote attribution (robust to the _serialized/$1 rename)
     let order = null;
     if (msg.hasQuotedMsg) {
       try {
         const quoted = await msg.getQuotedMessage();
-        const qid = quoted.id._serialized;
-        order =
-          this.db.orders.find((o) => o.photoRequestMsgId === qid) ||
-          store.findByGroupMsgId(this.db, qid);
+        const qid = quoted && quoted.id && (quoted.id._serialized || quoted.id.$1 || null);
+        if (qid) {
+          order =
+            this.db.orders.find((o) => o.photoRequestMsgId === qid) ||
+            store.findByGroupMsgId(this.db, qid);
+        }
       } catch (err) {
-        log.warn(`שליפת הודעה מצוטטת נכשלה (${err.message}) - משייך לפי הזמנה ממתינה`);
+        log.warn(`שליפת הודעה מצוטטת נכשלה (${err.message})`);
       }
     }
-    // Fallback (FR-13): attribute to the most recent order awaiting photos.
-    if (!order) order = store.findAwaitingPhotos(this.db);
-    if (!order || !['awaiting_photos', 'picking'].includes(order.status)) return;
 
+    // 2) a single open order -> obvious attribution
+    const open = this.openPhotoOrders().filter((o) => o.status !== 'documented');
+    if (!order && open.length === 1) order = open[0];
+    if (!order && msg.hasQuotedMsg && open.length) order = open[0];
+
+    if (order) return this.attachShipmentPhoto(msg, order);
+
+    // 3) unknown attribution: stash the photo and ask in the group
+    const tempPath = await this.saveMediaToTemp(msg);
+    if (!tempPath) return;
+    this.pendingPhoto = this.pendingPhoto || { files: [], asked: false };
+    this.pendingPhoto.files.push(tempPath);
+    this.pendingPhoto.at = Date.now();
+    if (!this.pendingPhoto.asked) {
+      this.pendingPhoto.asked = true;
+      const options = this.openPhotoOrders()
+        .slice(0, 6)
+        .map((o) => `${o.id} (${o.customerName})`)
+        .join(' / ');
+      await sendAndConfirm(
+        this.client,
+        (this.photosGroup || this.pickingGroup).id._serialized,
+        `לאיזו הזמנה שייכת התמונה? ${options || 'לא מצאתי הזמנות פתוחות - נא לציין מספר הזמנה'}`,
+      );
+      bus.yuval('התקבלה תמונה ללא שיוך — שאלתי בקבוצה לאיזו הזמנה היא שייכת');
+    }
+  }
+
+  async attachShipmentPhoto(msg, order) {
     const savedPath = await this.saveMediaToOrder(msg, order, 'evidence');
     if (!savedPath) return;
-
     store.addHistory(order, 'photo_attached', path.basename(savedPath));
-    log.info(`הזמנה ${order.id}: צורפה תמונה (${order.photos.length}/2)`);
-    bus.yuval(`תמונת תיעוד ${order.photos.length}/2 התקבלה · ${order.id}`);
+    bus.yuval(`תמונת תיעוד התקבלה · ${order.id}`);
 
-    // Documentation is complete after the two required photos (marked sheet +
-    // packed shipment).
-    if (order.photos.length >= 2 && order.status !== 'documented') {
+    if (order.status !== 'documented') {
       order.status = 'documented';
-      store.addHistory(order, 'order_documented', 'התקבלו שתי תמונות התיעוד - ההזמנה מתועדת ומוכנה להמשך תהליך');
-      bus.yuval(`ההזמנה ${order.id} תועדה במלואה — דף מסומן + משלוח ארוז`);
+      store.addHistory(order, 'order_picked', 'התקבלה תמונת משלוח - ההזמנה סומנה כלוקטה');
+      bus.yuval(`ההזמנה ${order.id} לוקטה — המשלוח מתועד`);
       this.save();
-      await this.safeReply(msg, replies.documented(order));
+      await this.safeReply(msg, `ההזמנה ${order.id} (${order.customerName}) סומנה כלוקטה ✓`);
     } else {
       this.save();
       await this.safeReact(msg, '👍');
+    }
+  }
+
+  // Free text in the photos group: answer to a pending "which order?" question
+  // or a general remark about an order.
+  async handleGroupText(msg) {
+    this.reload();
+    const body = (msg.body || '').trim();
+    if (!body) return;
+
+    // find a referenced order: explicit id first, company name second
+    let order = null;
+    const idMatch = body.match(/([A-Za-z]{1,3}-\d{8}(?:-\d+)?)/);
+    if (idMatch) {
+      order = this.db.orders.find((o) => o.id.toLowerCase() === idMatch[1].toLowerCase()) || null;
+    }
+    if (!order) {
+      const company = this.matchCompanyByText(body);
+      if (company) {
+        order = this.openPhotoOrders().find((o) => o.customerName === company.name) || null;
+      }
+    }
+
+    // pending unattributed photos + an answer -> attach them
+    if (this.pendingPhoto && this.pendingPhoto.files.length) {
+      if (!order) {
+        await this.safeReply(msg, 'לא זיהיתי את ההזמנה - נא לציין מספר הזמנה (למשל KC-26072026) או שם חברה');
+        return;
+      }
+      const files = this.pendingPhoto.files;
+      this.pendingPhoto = null;
+      for (const tempPath of files) {
+        const fileName = `${store.orderFileBase(order)}-evidence-${order.photos.length + 1}${path.extname(tempPath)}`;
+        const finalPath = path.join(store.customerDir(order), fileName);
+        try {
+          fs.renameSync(tempPath, finalPath);
+          order.photos.push({ path: finalPath, from: msg.author || msg.from, at: new Date().toISOString() });
+          store.addHistory(order, 'photo_attached', fileName);
+        } catch (err) {
+          log.error('העברת תמונה ממתינה נכשלה:', err.message);
+        }
+      }
+      if (order.status !== 'documented') {
+        order.status = 'documented';
+        store.addHistory(order, 'order_picked', 'התמונות שויכו לפי תשובת המלקט - ההזמנה סומנה כלוקטה');
+      }
+      this.save();
+      bus.yuval(`התמונות שויכו להזמנה ${order.id} — ההזמנה לוקטה`);
+      await this.safeReply(msg, `התמונות שויכו להזמנה ${order.id} (${order.customerName}) - סומנה כלוקטה ✓`);
+      return;
+    }
+
+    if (order) {
+      bus.yuval(`הודעה בקבוצת התיעוד על ${order.id}: "${body.slice(0, 60)}"`);
+      store.addHistory(order, 'group_note', body.slice(0, 200));
+      this.save();
+    }
+  }
+
+  async saveMediaToTemp(msg) {
+    try {
+      const media = await msg.downloadMedia();
+      if (!media) return null;
+      const dir = path.join(config.dataDir, 'pending-photos');
+      fs.mkdirSync(dir, { recursive: true });
+      const ext = (media.mimetype || 'image/jpeg').split('/')[1].split(';')[0];
+      const filePath = path.join(dir, `pending-${Date.now()}.${ext}`);
+      fs.writeFileSync(filePath, Buffer.from(media.data, 'base64'));
+      return filePath;
+    } catch (err) {
+      log.error('שמירת תמונה זמנית נכשלה:', err.message);
+      return null;
     }
   }
 

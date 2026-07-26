@@ -548,8 +548,11 @@ async function openRules() {
 }
 
 // ---------- stats page ----------
+let statsPeriod = 'today';
+
 async function openStats() {
-  const { totals, perCustomer } = await api.getStatsFull();
+  const { totals, perCustomer } = await api.getStatsFull(statsPeriod);
+  document.querySelectorAll('#stats-period button').forEach((b) => b.classList.toggle('on', b.dataset.p === statsPeriod));
   const cards = [
     [totals.orders, 'הזמנות סה"כ'],
     [totals.avgItems ?? '—', 'ממוצע פריטים להזמנה'],
@@ -563,7 +566,7 @@ async function openStats() {
   body.innerHTML = '';
   for (const r of perCustomer) {
     const tr = document.createElement('tr');
-    for (const val of [r.name, r.orders, r.avgItems ?? '—', r.avgOrderHour ?? '—', r.totalChanges, r.postPrintChanges, r.avgVersions ?? '—', r.documentedPct == null ? '—' : r.documentedPct + '%']) {
+    for (const val of [r.name, r.orders, r.avgItems ?? '—', r.avgOrderHour ?? '—', r.totalChanges, r.postPrintChanges, r.avgVersions ?? '—']) {
       const td = document.createElement('td');
       td.textContent = val;
       tr.appendChild(td);
@@ -593,6 +596,19 @@ async function openComplaints() {
   document.getElementById('complaints-page').classList.add('visible');
 }
 
+// ---------- end of day ----------
+async function endDay() {
+  document.getElementById('dayend-overlay').classList.add('visible');
+  await api.endDay();
+}
+
+async function resumeDay() {
+  const btn = document.getElementById('resume-btn');
+  btn.disabled = true;
+  btn.textContent = 'מתחבר… (עד חצי דקה)';
+  await api.resumeDay();
+}
+
 // ---------- boot ----------
 (async function boot() {
   document.getElementById('ava-naama').innerHTML = avatarSvg(WORKERS[0].avatar);
@@ -610,7 +626,22 @@ async function openComplaints() {
   api.onQr(({ dataUrl }) => renderQr(dataUrl));
   api.onConn((c) => {
     applyConn(c);
-    if (c.whatsapp.state === 'connected') renderConnectedQrBox();
+    if (c.whatsapp.state === 'connected') {
+      renderConnectedQrBox();
+      const overlay = document.getElementById('dayend-overlay');
+      if (overlay.classList.contains('visible')) {
+        overlay.classList.remove('visible');
+        const btn = document.getElementById('resume-btn');
+        btn.disabled = false;
+        btn.textContent = 'התחברות והתחלת יום עבודה';
+      }
+    }
+  });
+  document.querySelectorAll('#stats-period button').forEach((b) => {
+    b.onclick = () => {
+      statsPeriod = b.dataset.p;
+      openStats();
+    };
   });
   api.onWorker(workerLine);
   api.onCrm(() => refreshCustomers());
@@ -621,4 +652,5 @@ async function openComplaints() {
   if (settings.setupDone && settings.workers) enterDashboard(false);
   else if (settings.setupDone) goSelect();
   else go('s1');
+  if (settings.dayEnded && settings.setupDone) document.getElementById('dayend-overlay').classList.add('visible');
 })();

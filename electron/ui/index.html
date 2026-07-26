@@ -233,6 +233,19 @@
   table.stats-t tr:last-child td { border-bottom: 0; }
   .changes-cell { font-size: 12px; color: #8a4a00; line-height: 1.6; max-width: 260px; }
   .empty-note { text-align: center; color: #8b877a; padding: 40px 0; font-size: 14.5px; }
+  .end-day { color: #C63B2F !important; border-color: #F5C9C4 !important; }
+  #dayend-overlay {
+    position: fixed; inset: 0; z-index: 300; background: var(--cream);
+    display: none; align-items: center; justify-content: center;
+  }
+  #dayend-overlay.visible { display: flex; }
+  .dayend-card {
+    background: #fff; border-radius: 22px; padding: 48px 60px; text-align: center;
+    box-shadow: 0 12px 44px rgba(36,48,31,.14); max-width: 480px;
+  }
+  .dayend-card img { width: 90px; height: 90px; border-radius: 50%; margin-bottom: 18px; filter: grayscale(.4); }
+  .dayend-card h2 { color: var(--green-dark); font-size: 24px; margin-bottom: 8px; }
+  .dayend-card p { color: #6b7361; font-size: 14.5px; line-height: 1.8; margin-bottom: 24px; }
 
   .modal-back { position: fixed; inset: 0; background: rgba(36,48,31,.45); display: none; align-items: center; justify-content: center; z-index: 200; }
   .modal-back.visible { display: flex; }
@@ -341,6 +354,7 @@
     <div class="title">פירות העמק<small>Triple Digital Workforce</small></div>
     <div class="conns" id="conns"></div>
     <button class="workers-btn" onclick="goSelect()">העובדים שלי</button>
+    <button class="workers-btn end-day" onclick="endDay()">סיום יום עבודה</button>
   </div>
   <div class="keep-open degradable">לא לצאת מתוכנה זו — השאירו אותה פתוחה ברקע</div>
 
@@ -406,6 +420,17 @@
   </div>
 </section>
 
+<div id="dayend-overlay">
+  <div class="dayend-card">
+    <img src="../../assets/logo.png" alt="">
+    <h2>יום העבודה הסתיים</h2>
+    <p>המערכת מושבתת ולא קולטת הודעות כרגע.<br>
+    כל ההגדרות, החיבורים וההזמנות שמורים.<br>
+    הודעות שיתקבלו בינתיים יטופלו אוטומטית בהתחברות הבאה.</p>
+    <button class="btn yellow" id="resume-btn" onclick="resumeDay()">התחברות והתחלת יום עבודה</button>
+  </div>
+</div>
+
 <div class="modal-back" id="fix-modal">
   <div class="modal" style="max-width:480px;width:92%">
     <h3 id="fix-title"></h3>
@@ -448,6 +473,13 @@
 <section class="page-overlay" id="stats-page">
   <div class="page-head">
     <h2>דף סטטיסטיקות</h2>
+    <div class="view-toggle" id="stats-period">
+      <button data-p="today" class="on">היום</button>
+      <button data-p="week">שבוע</button>
+      <button data-p="month">חודש</button>
+      <button data-p="year">שנה</button>
+      <button data-p="all">הכל</button>
+    </div>
     <button class="back-btn" onclick="document.getElementById('stats-page').classList.remove('visible')">חזרה לדשבורד</button>
   </div>
   <div class="page-body">
@@ -456,7 +488,7 @@
       <table class="stats-t">
         <thead><tr>
           <th>לקוח</th><th>הזמנות</th><th>ממוצע פריטים</th><th>שעת הזמנה ממוצעת</th>
-          <th>שינויים בהזמנות</th><th>שינויים אחרי הדפסה</th><th>ממוצע גרסאות</th><th>% תיעוד מלא</th>
+          <th>שינויים בהזמנות</th><th>שינויים אחרי הדפסה</th><th>ממוצע גרסאות</th>
         </tr></thead>
         <tbody id="stats-body"></tbody>
       </table>

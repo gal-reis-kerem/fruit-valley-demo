@@ -6,7 +6,7 @@ const bus = require('./bus');
 const { createWhatsAppClient, listGroups, resolvePhoneId, installReactionHook } = require('./whatsapp/client');
 const { Orchestrator } = require('./flow/orchestrator');
 const { startWebServer } = require('./web/server');
-const { readSettings } = require('./settings');
+const { readSettings, writeSettings } = require('./settings');
 const sheets = require('./crm/sheets');
 const store = require('./orders/store');
 const rules = require('./rules');
@@ -71,6 +71,77 @@ async function launchSafe(attempt) {
     setState('error');
     log.error('העלאת החיבור נכשלה:', err.message);
   }
+}
+
+// Dedup between live events and offline backfill
+const processedMsgs = new Set();
+function markProcessed(key) {
+  processedMsgs.add(key);
+  if (processedMsgs.size > 400) {
+    for (const k of [...processedMsgs].slice(0, 200)) processedMsgs.delete(k);
+  }
+}
+
+// Process text messages that arrived while the system was off. Scans the
+// in-memory message store of every private chat for messages newer than the
+// last time we were online, and runs them through the normal flow.
+async function backfillOffline(client, flow) {
+  const { lastSeenTs } = readSettings();
+  if (!lastSeenTs) return;
+  const cutoffSec = Math.floor(lastSeenTs / 1000);
+
+  const found = await client.pupPage.evaluate((cutoff) => {
+    const out = [];
+    let skippedMedia = 0;
+    const chats = window.require('WAWebCollections').Chat.getModelsArray();
+    for (const c of chats) {
+      if (!c.id || c.id.server === 'g.us') continue;
+      const msgs = (c.msgs && c.msgs.getModelsArray()) || [];
+      for (const m of msgs) {
+        if (!m.id || m.id.fromMe) continue;
+        if ((m.t || 0) <= cutoff) continue;
+        if (m.type !== 'chat' || !m.body) {
+          skippedMedia += 1;
+          continue;
+        }
+        out.push({ chatId: c.id._serialized, body: m.body, t: m.t });
+      }
+    }
+    return { msgs: out.sort((a, b) => a.t - b.t), skippedMedia };
+  }, cutoffSec);
+
+  let handled = 0;
+  for (const m of found.msgs) {
+    const key = `${m.chatId}|${m.t}`;
+    if (processedMsgs.has(key)) continue;
+    const phoneId = await resolvePhoneId(client, m.chatId);
+    const crmCompanies = sheets.contactCompanies(phoneId);
+    const isRep = phoneId === config.sourceContactId;
+    if (!isRep && !crmCompanies.length) continue;
+
+    markProcessed(key);
+    handled += 1;
+    log.info(`משלים הודעה שהתקבלה כשהמערכת הייתה כבויה: "${m.body.slice(0, 60)}"`);
+    bus.naama('מטפלת בהודעה שהתקבלה כשהמערכת הייתה כבויה');
+    const pseudoMsg = {
+      from: m.chatId,
+      body: m.body,
+      hasMedia: false,
+      timestamp: m.t,
+      reply: async () => {
+        throw new Error('backfill message - plain send instead');
+      },
+    };
+    const forcedCompany = !isRep && crmCompanies.length === 1 ? crmCompanies[0] : null;
+    try {
+      await flow.handleCustomerMessage(pseudoMsg, forcedCompany);
+    } catch (err) {
+      log.error('השלמת הודעה נכשלה:', err.message);
+    }
+  }
+  if (handled) log.info(`הושלמו ${handled} הודעות מזמן ההשבתה`);
+  if (found.skippedMedia) log.warn(`${found.skippedMedia} הודעות מדיה מזמן ההשבתה לא נקלטו אוטומטית`);
+  writeSettings({ lastSeenTs: Date.now() });
 }
 
 function setState(next) {
@@ -176,6 +247,9 @@ async function launchClient(attempt) {
     setState('connected');
     log.info('ממתין להזמנות… 🍎');
 
+    // Catch up on messages that arrived while the system was off
+    setTimeout(() => backfillOffline(client, flow).catch((err) => log.warn('השלמת הודעות נכשלה:', err.message)), 15000);
+
     // Liveness monitor: detect a silently reloaded page and relaunch.
     const liveness = setInterval(async () => {
       if (!state.running || state.client !== client) {
@@ -185,6 +259,7 @@ async function launchClient(attempt) {
       const alive = await client.pupPage
         .evaluate(() => typeof window.WWebJS !== 'undefined')
         .catch(() => false);
+      if (alive) writeSettings({ lastSeenTs: Date.now() });
       if (!alive) {
         clearInterval(liveness);
         log.warn('הדף של וואטסאפ התרענן ואיבד את ההאזנות - מתחבר מחדש אוטומטית…');
@@ -199,6 +274,8 @@ async function launchClient(attempt) {
       try {
         const chatId = msg.from;
         const isGroup = chatId.endsWith('@g.us');
+        if (msg.timestamp) markProcessed(`${chatId}|${msg.timestamp}`);
+        writeSettings({ lastSeenTs: Date.now() });
 
         if (!isGroup) {
           const phoneId = await resolvePhoneId(client, chatId);
@@ -217,6 +294,8 @@ async function launchClient(attempt) {
         const inPhotosGroup = photosGroup && chatId === photosGroup.id._serialized;
         if ((inPickingGroup || inPhotosGroup) && msg.hasMedia) {
           await flow.handleGroupMedia(msg);
+        } else if (inPhotosGroup && (msg.body || '').trim()) {
+          await flow.handleGroupText(msg);
         }
       } catch (err) {
         log.error('שגיאה בטיפול בהודעה:', err);
@@ -296,6 +375,24 @@ async function start({ cli = false, webPanel = true } = {}) {
     });
   }
 
+  if (readSettings().dayEnded) {
+    log.info('מצב סוף יום פעיל - ממתין ללחיצה על "התחברות" באפליקציה');
+    setState('stopped');
+  } else {
+    await startWhatsApp();
+  }
+}
+
+// End-of-day: stop cleanly and remember not to auto-connect on next launch.
+async function endDay() {
+  writeSettings({ dayEnded: true, lastSeenTs: Date.now() });
+  await stopWhatsApp();
+  bus.naama('סיימנו את יום העבודה - נתראה מחר');
+  bus.yuval('נסגר היום - כל ההזמנות והקבצים שמורים');
+}
+
+async function resumeDay() {
+  writeSettings({ dayEnded: false });
   await startWhatsApp();
 }
 
@@ -304,8 +401,8 @@ function getStats() {
   return store.todayStats(store.loadDB());
 }
 
-function getStatsFull() {
-  return statsMod.fullStats(config.companies);
+function getStatsFull(period) {
+  return statsMod.fullStats(config.companies, period);
 }
 
 function getComplaints() {
@@ -349,4 +446,4 @@ function getCustomers(date) {
   return store.customersOverview(store.loadDB(), config.companies, date);
 }
 
-module.exports = { start, startWhatsApp, stopWhatsApp, state, bus, getStats, getStatsFull, getComplaints, getRules, chatWithWorker, getCustomers, config };
+module.exports = { start, startWhatsApp, stopWhatsApp, endDay, resumeDay, state, bus, getStats, getStatsFull, getComplaints, getRules, chatWithWorker, getCustomers, config };

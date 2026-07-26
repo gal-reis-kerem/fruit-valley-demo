@@ -144,7 +144,9 @@ ipcMain.handle('open-portal', () => {
   const { portalUrl } = readSettings();
   if (portalUrl) shell.openExternal(portalUrl);
 });
-ipcMain.handle('get-stats-full', () => engine.getStatsFull());
+ipcMain.handle('get-stats-full', (e, period) => engine.getStatsFull(period));
+ipcMain.handle('end-day', () => engine.endDay());
+ipcMain.handle('resume-day', () => engine.resumeDay());
 ipcMain.handle('get-complaints', () => engine.getComplaints());
 ipcMain.handle('get-rules', (e, workerId) => engine.getRules(workerId));
 ipcMain.handle('worker-chat', async (e, worker, history) => {
