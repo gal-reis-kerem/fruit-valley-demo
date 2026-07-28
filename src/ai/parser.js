@@ -6,7 +6,7 @@ const client = new Anthropic();
 
 // FR-03 (message classification), FR-05 (order structure), FR-07 (multilingual
 // product names), FR-06 (billing method: weight / unit / package).
-const ORDER_SCHEMA = {
+const buildOrderSchema = () => ({
   type: 'object',
   additionalProperties: false,
   required: ['classification', 'company', 'complaint', 'delivery_date', 'customer_note', 'location_detail', 'reply_text', 'items'],
@@ -99,7 +99,7 @@ const ORDER_SCHEMA = {
       },
     },
   },
-};
+});
 
 const SYSTEM_PROMPT = `You are the operations-desk digital worker of "פירות העמק" (Fruit Valley), an Israeli fresh-produce wholesaler.
 Customers send free-text WhatsApp messages with orders for fruits, vegetables, dairy and groceries, written in casual human Hebrew.
@@ -141,7 +141,7 @@ async function parseOrderMessage(messageText, now = new Date()) {
       },
     ],
     output_config: {
-      format: { type: 'json_schema', schema: ORDER_SCHEMA },
+      format: { type: 'json_schema', schema: buildOrderSchema() },
     },
     messages: [
       {
