@@ -29,6 +29,9 @@ const config = {
   pickingGroupName: process.env.PICKING_GROUP_NAME || '',
   photosGroupName: process.env.PHOTOS_GROUP_NAME || '',
   changesCutoff: process.env.CHANGES_CUTOFF || '14:00',
+  // CRM v2: the Fruit Valley customers spreadsheet (payer + office model).
+  // Central place for the id - never scatter it through the code.
+  crmSpreadsheetId: process.env.CRM_SPREADSHEET_ID || '1JRWKQblbuGn_4gLVFMl5rhgKCj5SIVI4vK9_kL2A8ag',
   // Triple team contact for worker escalations ("מדבר עם החבר'ה של טריפל")
   tripleContact: normalizePhone(process.env.TRIPLE_CONTACT_NUMBER || '0548383333'),
   tripleContactId: normalizePhone(process.env.TRIPLE_CONTACT_NUMBER || '0548383333') + '@c.us',
@@ -37,7 +40,7 @@ const config = {
   // injection (window.Store never gets built). Override via WWEB_VERSION once
   // a fixed library release lands.
   wwebVersion: process.env.WWEB_VERSION || '2.3000.1039710401-alpha',
-  dataDir: path.join(ROOT, 'data'),
+  dataDir: process.env.FV_DATA_DIR || path.join(ROOT, 'data'),
   outputDir: path.join(ROOT, 'output'),
   authDir: path.join(ROOT, '.wwebjs_auth'),
 };

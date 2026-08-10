@@ -55,6 +55,7 @@ const buildOrderSchema = () => ({
         type: 'object',
         additionalProperties: false,
         required: [
+          'floor',
           'action',
           'product_he',
           'product_en',
@@ -67,6 +68,11 @@ const buildOrderSchema = () => ({
           'vat_exempt',
         ],
         properties: {
+          floor: {
+            type: ['string', 'null'],
+            description:
+              'Floor/section this item belongs to, when the message groups items by floor (e.g. "קומה 2", "קומה 5", "מטבח צפוני"). Keep the customer wording. null when no floor grouping exists.',
+          },
           action: {
             type: 'string',
             enum: ['add', 'remove'],
@@ -114,6 +120,8 @@ Rules:
 - Categorize each item into its picking area: vegetables / fruits / dairy / other. This ordering also serves invoicing (VAT-exempt items grouped together).
 - vat_exempt = true only for fresh fruits & vegetables.
 - Classification: if the message contains a list of products with no reference to a previous order today, it is new_order. Words like "תוסיפו", "עוד", "שכחתי" indicate addition. "תורידו", "במקום", "להוריד מההזמנה" indicate change. "תבטלו" (the whole order) indicates cancellation. Anything with no order content is general.
+- Floors: when the customer splits the list by floors/sections ("קומה 2:", "קומה 5:"), set floor on every item of that section, preserve the floor order, and NEVER merge quantities of the same product across floors - keep separate items per floor.
+- Unit codes: "k" means ק"ג and "u" means יחידה (e.g. "עגבניות 2k" -> quantity 2 unit ק"ג; "מלון 3u" -> quantity 3 unit יחידה).
 - Item action: mark items the customer wants REMOVED from the order with action="remove" (e.g. "יכול להוריד את הענבים?" -> item ענבים with action="remove", quantity null). Everything else is action="add". Removing specific items is a change, NOT a cancellation.
 - delivery_date: resolve relative dates ("מחר", "ליום ראשון") to an absolute date. Default: tomorrow (orders are normally for the next day).
 - Keep item order stable within each category (as written by the customer).

@@ -96,15 +96,12 @@ ipcMain.handle('get-boot', async () => ({
 ipcMain.handle('get-conn', () => connSnapshot());
 ipcMain.handle('get-customers', (e, date) => engine.getCustomers(date));
 ipcMain.handle('save-phone', (e, phone) => writeSettings({ businessPhone: phone }));
-ipcMain.handle('save-sheet', async (e, url) => {
-  if (!url || !url.trim()) {
-    writeSettings({ sheetUrl: '' });
-    return { ok: true, skipped: true };
-  }
+ipcMain.handle('save-sheet', async () => {
+  // CRM v2: the central spreadsheet is configured via CRM_SPREADSHEET_ID -
+  // the wizard step now just verifies the connection.
   try {
-    const companies = await sheets.refresh(url.trim());
-    writeSettings({ sheetUrl: url.trim() });
-    sheets.startPolling(url.trim());
+    const companies = await sheets.refresh();
+    sheets.startPolling();
     return { ok: true, companies: companies.map((c) => c.name) };
   } catch (err) {
     return { ok: false, error: err.message };
@@ -124,10 +121,8 @@ ipcMain.handle('reconnect-whatsapp', async () => {
   engine.startWhatsApp().catch((err) => log.error('חיבור מחדש נכשל:', err.message));
 });
 ipcMain.handle('retry-crm', async () => {
-  const { sheetUrl } = readSettings();
-  if (!sheetUrl) return { ok: false, error: 'לא הוגדר גיליון' };
   try {
-    await sheets.refresh(sheetUrl);
+    await sheets.refresh();
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err.message };
@@ -137,9 +132,9 @@ ipcMain.handle('retry-crm', async () => {
 });
 ipcMain.handle('retry-portal', () => checkPortal());
 ipcMain.handle('open-sheet', () => {
-  const { sheetUrl } = readSettings();
-  if (sheetUrl) shell.openExternal(sheetUrl);
+  shell.openExternal(`https://docs.google.com/spreadsheets/d/${config.crmSpreadsheetId}`);
 });
+ipcMain.handle('crm-readiness', () => sheets.readinessReport());
 ipcMain.handle('open-portal', () => {
   const { portalUrl } = readSettings();
   if (portalUrl) shell.openExternal(portalUrl);

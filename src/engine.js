@@ -133,8 +133,9 @@ async function backfillOffline(client, flow) {
       },
     };
     const forcedCompany = !isRep && crmCompanies.length === 1 ? crmCompanies[0] : null;
+    const candidates = crmCompanies.length > 1 ? crmCompanies : null;
     try {
-      await flow.handleCustomerMessage(pseudoMsg, forcedCompany);
+      await flow.handleCustomerMessage(pseudoMsg, forcedCompany, candidates);
     } catch (err) {
       log.error('השלמת הודעה נכשלה:', err.message);
     }
@@ -282,8 +283,11 @@ async function launchClient(attempt) {
           const crmCompanies = sheets.contactCompanies(phoneId);
           const isRep = phoneId === config.sourceContactId;
           if (isRep || crmCompanies.length) {
+            // unique contact -> automatic attribution; shared phone -> the
+            // candidates are passed on and NEVER auto-assigned (FoodiFairy)
             const forcedCompany = !isRep && crmCompanies.length === 1 ? crmCompanies[0] : null;
-            await flow.handleCustomerMessage(msg, forcedCompany);
+            const candidates = crmCompanies.length > 1 ? crmCompanies : null;
+            await flow.handleCustomerMessage(msg, forcedCompany, candidates);
           } else {
             log.info(`הודעה פרטית ממספר לא מוגדר (${chatId}${phoneId !== chatId ? ` = ${phoneId}` : ''}) - מתעלם`);
           }
@@ -362,9 +366,8 @@ async function start({ cli = false, webPanel = true } = {}) {
     log.error('בדיקת מפתח Anthropic נכשלה:', keyCheck.error);
   }
 
-  // CRM: if a sheet was configured in the wizard, keep companies in sync.
-  const settings = readSettings();
-  if (settings.sheetUrl) sheets.startPolling(settings.sheetUrl);
+  // CRM v2 is the central source of truth - always sync and keep polling.
+  sheets.startPolling();
 
   if (webPanel) {
     startWebServer({

@@ -74,6 +74,28 @@ function itemRow(item, idx) {
     </tr>`;
 }
 
+// Floors mode: group by floor in first-appearance order; items keep their
+// received order inside each floor and are NEVER merged across floors.
+function floorSections(items) {
+  const floors = [];
+  const byFloor = new Map();
+  for (const it of items) {
+    const key = it.floor || 'ללא שיוך קומה';
+    if (!byFloor.has(key)) {
+      byFloor.set(key, []);
+      floors.push(key);
+    }
+    byFloor.get(key).push(it);
+  }
+  let html = '';
+  let idx = 1;
+  for (const floor of floors) {
+    html += `\n    <tr class="cat-row floor-row"><td colspan="8">🏢 ${esc(floor)}</td></tr>`;
+    for (const it of byFloor.get(floor)) html += itemRow(it, idx++);
+  }
+  return html;
+}
+
 function categorySection(cat, items, startIdx) {
   if (!items.length) return { html: '', nextIdx: startIdx };
   let idx = startIdx;
@@ -97,12 +119,16 @@ function buildPickingSheetHTML(order, opts = {}) {
   const generatedAt = new Date().toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' });
 
   let body = '';
-  let idx = 1;
-  for (const cat of CATEGORY_ORDER) {
-    const items = order.items.filter((it) => it.category === cat);
-    const section = categorySection(cat, items, idx);
-    body += section.html;
-    idx = section.nextIdx;
+  if (order.displayMode === 'floors' && order.items.some((it) => it.floor)) {
+    body = floorSections(order.items);
+  } else {
+    let idx = 1;
+    for (const cat of CATEGORY_ORDER) {
+      const items = order.items.filter((it) => it.category === cat);
+      const section = categorySection(cat, items, idx);
+      body += section.html;
+      idx = section.nextIdx;
+    }
   }
 
   // Five blank rows for hand-written changes after the sheet is printed
@@ -163,6 +189,7 @@ function buildPickingSheetHTML(order, opts = {}) {
   td.picker-note { width: 100px; }
   tr.cat-row td { background: #2e7d32; color: #fff; font-weight: bold; font-size: 14px; padding: 4px 8px; }
   tr.cat-row .vat { font-weight: normal; font-size: 11px; opacity: 0.85; }
+  tr.floor-row td { background: #3E6B9B; font-size: 15px; }
   tr.cat-row.manual-head td { background: #616161; }
   tr.manual td { height: 30px; }
   .badge { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 8px; color: #fff; vertical-align: middle; }

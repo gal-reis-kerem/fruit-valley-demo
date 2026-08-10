@@ -9,6 +9,9 @@ const { MessageMedia, sendAndConfirm, resolvePhoneId } = require('../whatsapp/cl
 const replies = require('./replies');
 const bus = require('../bus');
 const complaints = require('../complaints');
+const baseOrders = require('../orders/baseOrders');
+const crypto = require('crypto');
+const { mediaToText } = require('../parsers/registry');
 
 /**
  * The core business flow (PRD "זרימת המוצר המרכזית", steps 1-8):
@@ -42,16 +45,20 @@ class Orchestrator {
     );
   }
 
+  // All companies referenced by the text. Auto-attribution is allowed only
+  // when EXACTLY ONE matches; a payer name shared by several offices yields
+  // multiple candidates -> ask, never guess.
+  matchCompaniesByText(text) {
+    const t = String(text || '').toLowerCase().replace(/[׳'"״]/g, '');
+    const hit = (v) => v && t.includes(String(v).toLowerCase().replace(/[׳'"״]/g, ''));
+    const full = config.companies.filter((c) => hit(c.name) || hit(c.nameEn));
+    if (full.length) return full;
+    return config.companies.filter((c) => (c.aliases || []).some(hit));
+  }
+
   matchCompanyByText(text) {
-    const t = String(text || '').toLowerCase();
-    return (
-      config.companies.find(
-        (c) =>
-          t.includes(c.name.toLowerCase()) ||
-          t.includes(c.nameEn.toLowerCase()) ||
-          (c.aliases || []).some((a) => t.includes(a.toLowerCase())),
-      ) || null
-    );
+    const list = this.matchCompaniesByText(text);
+    return list.length === 1 ? list[0] : null;
   }
 
   companyOptions() {
@@ -97,32 +104,63 @@ class Orchestrator {
   // ---------- Step 1-5: incoming customer message ----------
   // forcedCompany: when the sender is a CRM contact of exactly one company,
   // attribution is automatic and the "which company?" question is skipped.
-  async handleCustomerMessage(msg, forcedCompany = null) {
+  async handleCustomerMessage(msg, forcedCompany = null, contactCandidates = null) {
     this.reload();
     const body = (msg.body || '').trim();
     log.info(`הודעה מהנציג: "${body.slice(0, 80)}${body.length > 80 ? '…' : ''}"`);
     bus.naama('הודעה חדשה התקבלה בוואטסאפ');
 
-    if (!body && msg.hasMedia) {
-      // A bare image from the customer (e.g. photo of a specific product) —
-      // attach it to the most recent open order across all companies.
-      const open = config.companies
-        .map((c) => store.findOpenOrder(this.db, c.name))
-        .filter(Boolean)
-        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
-      if (open) {
-        await this.saveMediaToOrder(msg, open, 'customer-image');
-        store.addHistory(open, 'customer_image_attached', 'תמונה מהלקוח צורפה להזמנה');
-        this.save();
-        await this.safeReply(msg, `📎 התמונה צורפה להזמנה ${open.id}.`);
+    // Documents (PDF / Excel) arriving over WhatsApp: extract text and run
+    // it through the normal order flow. Idempotent per file content hash.
+    let effectiveBody = body;
+    let provenance = null;
+    if (msg.hasMedia) {
+      const media = await msg.downloadMedia().catch(() => null);
+      if (media) {
+        const hash = crypto.createHash('sha1').update(media.data).digest('hex');
+        if (this.isMediaProcessed(hash)) {
+          log.info('קובץ שכבר עובד התקבל שוב - מדלגת (idempotency)');
+          return;
+        }
+        const doc = await mediaToText(media, forcedCompany && forcedCompany.crm);
+        if (doc && doc.manualReview) {
+          this.markMediaProcessed(hash);
+          this.saveManualReviewFile(media, msg.from);
+          bus.naama(`קובץ שלא הצלחתי לקרוא — הועבר לבדיקה ידנית`);
+          await this.safeReply(msg, `קיבלתי את הקובץ, אבל לא הצלחתי לקרוא אותו אוטומטית (${doc.manualReview}). נציג אנושי יטפל בו 🙏`);
+          return;
+        }
+        if (doc && doc.text) {
+          this.markMediaProcessed(hash);
+          provenance = doc.provenance;
+          effectiveBody = [body, doc.text].filter(Boolean).join('\n');
+          bus.naama(`קיבלתי קובץ (${provenance}) — מחלצת ממנו את ההזמנה`);
+          log.info(`מסמך פוענח (${provenance}), ${doc.text.length} תווים`);
+        } else if (!body) {
+          // plain image: attach to the most recent open order
+          const open = config.companies
+            .map((c) => store.findOpenOrder(this.db, c.name))
+            .filter(Boolean)
+            .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+          if (open) {
+            await this.saveMediaToOrder(msg, open, 'customer-image');
+            store.addHistory(open, 'customer_image_attached', 'תמונה מהלקוח צורפה להזמנה');
+            this.save();
+            await this.safeReply(msg, `📎 התמונה צורפה להזמנה ${open.id}.`);
+          }
+          return;
+        }
       }
-      return;
     }
-    if (!body) return;
+    if (!effectiveBody) return;
 
     // Is this the answer to a pending "which company?" question?
     if (this.pending) {
-      const company = this.matchCompanyByText(body);
+      const fromCandidates = (this.pending.candidates || []).filter((c) =>
+        String(body).toLowerCase().includes(c.name.toLowerCase()) ||
+        (c.aliases || []).some((a) => String(body).toLowerCase().includes(String(a).toLowerCase())),
+      );
+      const company = fromCandidates.length === 1 ? fromCandidates[0] : this.matchCompanyByText(body);
       if (company) {
         const { parsed, rawBody } = this.pending;
         this.pending = null;
@@ -137,7 +175,7 @@ class Orchestrator {
 
     let parsed;
     try {
-      parsed = await parseOrderMessage(body);
+      parsed = await parseOrderMessage(effectiveBody);
     } catch (err) {
       log.error('פרסור הודעה נכשל:', err.message);
       await this.safeReply(msg, '⚠️ לא הצלחתי לעבד את ההודעה, נציג אנושי יטפל בה.');
@@ -179,16 +217,23 @@ class Orchestrator {
           }
         }
       }
-      this.pending = { parsed, rawBody: body, at: Date.now() };
-      bus.naama('לא צוינה חברה — שואלת את הלקוח לאיזו חברה ההזמנה');
+      const textCandidates = this.matchCompaniesByText(parsed.company || effectiveBody);
+      const candidates =
+        (contactCandidates && contactCandidates.length ? contactCandidates : null) ||
+        (textCandidates.length > 1 ? textCandidates : null);
+      this.pending = { parsed, rawBody: body, at: Date.now(), candidates };
+      bus.naama(candidates
+        ? `שיוך לא חד-משמעי (${candidates.length} אפשרויות) — שואלת את הלקוח`
+        : 'לא צוין לקוח — שואלת את הלקוח לאיזה לקוח ההזמנה');
+      const options = (candidates || config.companies).slice(0, 8).map((c) => c.name).join(' / ');
       const question =
-        parsed.reply_text && !parsed.reply_text.includes('{{ORDER}}')
+        !candidates && parsed.reply_text && !parsed.reply_text.includes('{{ORDER}}')
           ? parsed.reply_text
-          : `קיבלתי! לאיזו חברה ההזמנה - ${this.companyOptions()}? 🙏`;
+          : `קיבלתי! לאיזה לקוח שייכת ההזמנה - ${options}? 🙏`;
       return this.safeReply(msg, question);
     }
 
-    return this.dispatchParsed(msg, parsed, body, company);
+    return this.dispatchParsed(msg, parsed, effectiveBody, company);
   }
 
   dispatchParsed(msg, parsed, rawBody, company) {
@@ -228,6 +273,30 @@ class Orchestrator {
       return this.applyAddition(msg, existing, parsed, rawBody);
     }
 
+    // Fixed-order offices: WhatsApp messages are CHANGES applied on the
+    // stored base order (with full audit of base version + changes).
+    let items = parsed.items;
+    let baseAudit = null;
+    const crm = company.crm || null;
+    if (crm && crm.orderType === 'fixed') {
+      const base = baseOrders.baseFor(crm.key, deliveryDate);
+      if (!base) {
+        bus.naama(`להזמנה של ${company.name} מוגדרת הזמנת בסיס קבועה - אך היא חסרה במאגר. מועבר לטיפול ידני`);
+        log.warn(`הזמנת בסיס חסרה עבור "${company.name}" - manual_review`);
+        await this.safeReply(msg, `ההזמנה של ${company.name} מוגדרת כהזמנה קבועה, אבל הזמנת הבסיס עדיין לא נטענה למערכת - נציג אנושי יטפל בהודעה 🙏`);
+        return;
+      }
+      const additions = parsed.items.filter((it) => it.action !== 'remove');
+      const removals = parsed.items.filter((it) => it.action === 'remove');
+      items = [...base.items];
+      for (const rem of removals) {
+        const idx = items.findIndex((it) => it.product_he.includes(rem.product_he) || rem.product_he.includes(it.product_he));
+        if (idx >= 0) items.splice(idx, 1);
+      }
+      items.push(...additions);
+      baseAudit = { baseVersion: base.versionId, added: additions.length, removed: removals.length };
+    }
+
     const order = store.createOrder(this.db, {
       deliveryDate,
       customerName: company.name,
@@ -235,9 +304,25 @@ class Orchestrator {
       initials: company.initials,
       customerNote: parsed.customer_note,
       locationDetail: parsed.location_detail,
-      items: parsed.items,
+      items,
       rawMessage: rawBody,
     });
+    if (crm) {
+      order.displayMode = crm.displayMode;
+      order.sourceChannel = 'whatsapp';
+      order.sourceFormat = crm.format === 'pdf' ? 'freetext' : crm.format;
+    }
+    if (baseAudit) {
+      order.baseAudit = baseAudit;
+      store.addHistory(order, 'base_order_applied', `בסיס ${baseAudit.baseVersion}: +${baseAudit.added} / -${baseAudit.removed} שינויים`);
+    }
+    // Floors validation: a floors-mode office whose input has no detectable
+    // floors is flagged for review - we never guess a floor.
+    if (crm && crm.displayMode === 'floors' && !order.items.some((it) => it.floor)) {
+      order.flags = [...(order.flags || []), 'floors_missing'];
+      store.addHistory(order, 'manual_review', 'לקוח בחלוקה לקומות אך לא זוהו קומות בקלט');
+      bus.naama(`אזהרה: ${company.name} מוגדר בחלוקה לקומות אך לא זוהו קומות בהזמנה — סומן לבדיקה`);
+    }
     this.save();
 
     // FR-02: immediate, human-sounding ack with the unified order number
@@ -621,6 +706,44 @@ class Orchestrator {
       bus.yuval(`הודעה בקבוצת התיעוד על ${order.id}: "${body.slice(0, 60)}"`);
       store.addHistory(order, 'group_note', body.slice(0, 200));
       this.save();
+    }
+  }
+
+  isMediaProcessed(hash) {
+    try {
+      const list = JSON.parse(fs.readFileSync(path.join(config.dataDir, 'processed-media.json'), 'utf8'));
+      return list.includes(hash);
+    } catch (err) {
+      return false;
+    }
+  }
+
+  markMediaProcessed(hash) {
+    const file = path.join(config.dataDir, 'processed-media.json');
+    let list = [];
+    try {
+      list = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch (err) { /* first time */ }
+    list.push(hash);
+    if (list.length > 500) list = list.slice(-300);
+    fs.mkdirSync(config.dataDir, { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(list));
+  }
+
+  // Unreadable originals are kept with their metadata for later inspection
+  saveManualReviewFile(media, from) {
+    try {
+      const dir = path.join(config.dataDir, 'manual-review');
+      fs.mkdirSync(dir, { recursive: true });
+      const ext = (media.mimetype || 'bin').split('/')[1].split(';')[0];
+      const base = `review-${Date.now()}`;
+      fs.writeFileSync(path.join(dir, `${base}.${ext}`), Buffer.from(media.data, 'base64'));
+      fs.writeFileSync(
+        path.join(dir, `${base}.json`),
+        JSON.stringify({ from, mimetype: media.mimetype, filename: media.filename || null, at: new Date().toISOString() }, null, 2),
+      );
+    } catch (err) {
+      log.error('שמירת קובץ לבדיקה ידנית נכשלה:', err.message);
     }
   }
 
