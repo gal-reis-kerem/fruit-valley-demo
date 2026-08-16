@@ -195,6 +195,102 @@ async function installReactionHook(client, onReactions) {
   log.info('הוק ריאקשנים הותקן ✔');
 }
 
+// Media messages (PDFs, photos) never reach wwebjs's 'message' event on the
+// pinned WhatsApp Web version - its serializer chokes on media models, so the
+// event dies silently. Install our own hook on the Msg collection: every NEW
+// incoming media message is downloaded and decrypted IN PAGE (via WhatsApp's
+// own DownloadManager) and forwarded to the callback as plain data. Call
+// after 'ready'; safe to call again after relaunch.
+async function installMediaHook(client, onMedia) {
+  try {
+    await client.pupPage.exposeFunction('onTripleMedia', (payload) => {
+      try {
+        onMedia(payload);
+      } catch (err) {
+        log.error('טיפול במדיה נכשל:', err.message);
+      }
+    });
+  } catch (err) {
+    // already exposed on this page - fine
+  }
+  await client.pupPage.evaluate(() => {
+    const Collections = window.require('WAWebCollections');
+    const Msg = Collections.Msg;
+    if (!Msg || Msg.__tripleMediaHooked) return;
+
+    const keyToString = (k) =>
+      k
+        ? k._serialized || k.$1 || [k.fromMe, k.remote && (k.remote._serialized || String(k.remote)), k.id].join('_')
+        : null;
+
+    const toB64 = (buf) => {
+      const bytes = new Uint8Array(buf);
+      let bin = '';
+      const CHUNK = 0x8000;
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+      }
+      return btoa(bin);
+    };
+
+    const download = async (m) => {
+      const dmMod = window.require('WAWebDownloadManager');
+      const dm = dmMod.downloadManager || dmMod.default || dmMod;
+      const buf = await dm.downloadAndMaybeDecrypt({
+        directPath: m.directPath,
+        encFilehash: m.encFilehash,
+        filehash: m.filehash,
+        mediaKey: m.mediaKey,
+        mediaKeyTimestamp: m.mediaKeyTimestamp,
+        type: m.type,
+        signal: new AbortController().signal,
+      });
+      return toB64(buf);
+    };
+
+    Msg.on('add', (m) => {
+      try {
+        if (!m || !m.isNewMsg || !m.id || m.id.fromMe) return;
+        if (!['image', 'document', 'video'].includes(m.type)) return;
+        // download with retries - keys/paths can lag the collection insert
+        (async () => {
+          let dataB64 = null;
+          let lastErr = null;
+          for (let attempt = 1; attempt <= 3 && !dataB64; attempt += 1) {
+            try {
+              dataB64 = await download(m);
+            } catch (e) {
+              lastErr = e;
+              await new Promise((r) => setTimeout(r, 2500 * attempt));
+            }
+          }
+          let quotedId = null;
+          const stanza = m.quotedStanzaID;
+          if (stanza) {
+            const q = Msg.getModelsArray().find((x) => x.id && x.id.id === stanza);
+            quotedId = q ? keyToString(q.id) : stanza;
+          }
+          window.onTripleMedia({
+            msgId: keyToString(m.id),
+            chatId: m.id.remote ? (m.id.remote._serialized || String(m.id.remote)) : String(m.from || ''),
+            senderId: m.author ? (m.author._serialized || String(m.author)) : null,
+            timestamp: m.t || Math.floor(Date.now() / 1000),
+            type: m.type,
+            mimetype: m.mimetype || (m.type === 'image' ? 'image/jpeg' : 'application/octet-stream'),
+            filename: m.filename || null,
+            caption: m.caption || (m.type === 'document' ? '' : m.body || '') || '',
+            quotedId,
+            dataB64,
+            error: dataB64 ? null : (lastErr && (lastErr.message || String(lastErr))) || 'download failed',
+          });
+        })();
+      } catch (e) { /* never break WhatsApp itself */ }
+    });
+    Msg.__tripleMediaHooked = true;
+  });
+  log.info('הוק מדיה הותקן ✔ (קבצים ותמונות נקלטים ישירות מהדף)');
+}
+
 // On the pinned WhatsApp Web version, client.sendMessage often DELIVERS the
 // message but resolves to undefined (the response serializer is broken).
 // Send, then recover the real message id from the chat's own message log so
@@ -246,5 +342,6 @@ module.exports = {
   resolvePhoneId,
   sendAndConfirm,
   installReactionHook,
+  installMediaHook,
   MessageMedia,
 };

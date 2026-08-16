@@ -3,7 +3,7 @@
 const { config } = require('./config');
 const log = require('./logger');
 const bus = require('./bus');
-const { createWhatsAppClient, listGroups, resolvePhoneId, installReactionHook } = require('./whatsapp/client');
+const { createWhatsAppClient, listGroups, resolvePhoneId, installReactionHook, installMediaHook } = require('./whatsapp/client');
 const { Orchestrator } = require('./flow/orchestrator');
 const { startWebServer } = require('./web/server');
 const { readSettings, writeSettings } = require('./settings');
@@ -305,6 +305,65 @@ async function launchClient(attempt) {
         log.error('שגיאה בטיפול בהודעה:', err);
       }
     });
+
+    // Media messages (PDFs, photos): wwebjs's 'message' event never fires for
+    // them on the pinned version, so a page hook downloads the file in-page
+    // and hands us plain data. Routed exactly like a regular message.
+    try {
+      await installMediaHook(client, async (payload) => {
+        try {
+          if (!payload || !payload.msgId) return;
+          const key = `${payload.chatId}|${payload.timestamp}`;
+          if (processedMsgs.has(key)) return; // wwebjs somehow handled it already
+          markProcessed(key);
+          writeSettings({ lastSeenTs: Date.now() });
+
+          if (!payload.dataB64) {
+            log.warn(`קובץ מדיה התקבל אך ההורדה נכשלה (${payload.error}) - מדלג`);
+            return;
+          }
+          log.info(`מדיה נקלטה מהדף: ${payload.type} (${payload.filename || payload.mimetype})${payload.caption ? ` + טקסט "${payload.caption.slice(0, 40)}"` : ''}`);
+
+          const pseudoMsg = {
+            id: { _serialized: payload.msgId },
+            from: payload.chatId,
+            author: payload.senderId,
+            body: payload.caption || '',
+            hasMedia: true,
+            type: payload.type,
+            timestamp: payload.timestamp,
+            hasQuotedMsg: Boolean(payload.quotedId),
+            getQuotedMessage: async () => ({ id: { _serialized: payload.quotedId } }),
+            downloadMedia: async () => ({
+              mimetype: payload.mimetype,
+              data: payload.dataB64,
+              filename: payload.filename,
+            }),
+            reply: async (text) => client.sendMessage(payload.chatId, text),
+            react: async () => {},
+          };
+
+          const isGroup = payload.chatId.endsWith('@g.us');
+          if (isGroup) {
+            const inPickingGroup = payload.chatId === pickingGroup.id._serialized;
+            const inPhotosGroup = photosGroup && payload.chatId === photosGroup.id._serialized;
+            if (inPickingGroup || inPhotosGroup) await flow.handleGroupMedia(pseudoMsg);
+            return;
+          }
+          const phoneId = await resolvePhoneId(client, payload.chatId);
+          const crmCompanies = sheets.contactCompanies(phoneId);
+          const isRep = phoneId === config.sourceContactId;
+          if (!isRep && !crmCompanies.length) return;
+          const forcedCompany = !isRep && crmCompanies.length === 1 ? crmCompanies[0] : null;
+          const candidates = crmCompanies.length > 1 ? crmCompanies : null;
+          await flow.handleCustomerMessage(pseudoMsg, forcedCompany, candidates);
+        } catch (err) {
+          log.error('שגיאה בטיפול במדיה:', err);
+        }
+      });
+    } catch (err) {
+      log.error('התקנת הוק המדיה נכשלה:', err.message);
+    }
 
     // Emoji reactions: custom page hook (wwebjs's listener is broken on
     // current WhatsApp Web) + the wwebjs event as backup.

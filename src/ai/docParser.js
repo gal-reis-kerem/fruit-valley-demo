@@ -33,11 +33,15 @@ const ITEM_SCHEMA = {
 const buildDocSchema = () => ({
   type: 'object',
   additionalProperties: false,
-  required: ['customer_name_in_doc', 'days_mentioned', 'orders'],
+  required: ['customer_name_in_doc', 'customer_name_he', 'days_mentioned', 'orders'],
   properties: {
     customer_name_in_doc: {
       type: ['string', 'null'],
       description: 'The customer/company name as written INSIDE the document (header, address block, delivery-note recipient). null if none appears.',
+    },
+    customer_name_he: {
+      type: ['string', 'null'],
+      description: 'The same customer name normalized to its common HEBREW form (e.g. "INFINEON TECHNOLOGIES" -> "אינפיניון", "בוסטון קיץ" -> "בוסטון"). null when no name appears or you cannot identify it.',
     },
     days_mentioned: {
       type: 'array',
@@ -47,12 +51,17 @@ const buildDocSchema = () => ({
     orders: {
       type: 'array',
       description:
-        'The order list(s) in the document. Almost always ONE entry. Multiple entries ONLY when the document explicitly contains separate lists for separate delivery dates (e.g. a weekly email with a table per day).',
+        'The order list(s) in the document. Usually ONE entry. Multiple entries when the document contains separate lists - either per delivery date (weekly email with a table per day) or per CUSTOMER (e.g. a combined "ברוקר + אינמוד" file with a section per customer).',
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['delivery_date', 'items'],
+        required: ['customer_name', 'delivery_date', 'items'],
         properties: {
+          customer_name: {
+            type: ['string', 'null'],
+            description:
+              'When the document is split into sections per customer, the customer this list belongs to (as written in the section header). null when the whole document is for one customer.',
+          },
           delivery_date: {
             type: ['string', 'null'],
             description: 'YYYY-MM-DD when the document states an explicit date for this list, else null.',
@@ -72,11 +81,13 @@ Rules:
 - Extract ONLY real order lines. Skip headers, totals, prices, signatures, page numbers.
 - Per-floor matrices: one item PER floor with that floor's quantity. Skip floors with quantity 0/empty. Never merge quantities across floors. Floor label = the column/section header as written.
 - A "סה״כ" (total) column is a checksum, not a floor - ignore it when per-floor quantities exist.
+- Per-CUSTOMER sections: when the document contains separate sections for separate customers (e.g. a combined "ברוקר + אינמוד" list with a heading per customer), return one orders[] entry per customer with customer_name set to that section's customer. NEVER merge items of different customers into one list.
 - Quantities: distinguish weight (ק"ג) from units/packages. Codes: k=ק"ג, u=יחידה.
 - Translate every product to English, Thai and Arabic.
 - category: vegetables / fruits / dairy / other (picking areas). vat_exempt=true only for fresh produce.
 - Keep the document's item order.
-- customer_name_in_doc: report the customer name exactly as the document shows it, even if surprising.
+- customer_name_in_doc: report the customer name exactly as the document shows it, even if surprising. customer_name_he: the same name in its common Hebrew form.
+- If an accompanying free-text message is provided (WhatsApp caption / email body), APPLY it to the extracted list: additions, removals, replacements, quantity changes and special requests. The message wins over the document.
 - Hebrew is RTL - scanned or reversed text may appear backwards; read it correctly.`;
 
 function mediaBlock(buffer, mediaType) {
@@ -89,13 +100,20 @@ function mediaBlock(buffer, mediaType) {
 /**
  * Parse an order document (PDF buffer or image) into structured lists.
  * @param {Buffer} buffer file content
- * @param {object} opts { mediaType, hint } - hint is free-text context, e.g.
- *   "base order of אלמה, floors display" or "weekly email of סולאראדג׳ ציפורית"
- * @returns {Promise<{customer_name_in_doc, days_mentioned, orders:[{delivery_date, items}]}>}
+ * @param {object} opts { mediaType, hint, accompanyingText } - hint is free-text
+ *   context ("base order of אלמה, floors display"); accompanyingText is the
+ *   customer's own message sent WITH the document (caption / email body) whose
+ *   changes and requests are applied on top of the document.
+ * @returns {Promise<{customer_name_in_doc, customer_name_he, days_mentioned, orders:[{customer_name, delivery_date, items}]}>}
  */
-async function parseOrderDocument(buffer, { mediaType = 'application/pdf', hint = '' } = {}) {
+async function parseOrderDocument(buffer, { mediaType = 'application/pdf', hint = '', accompanyingText = '' } = {}) {
   const now = new Date();
   const todayStr = now.toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' });
+  const textParts = [`Today is ${todayStr} (Israel).${hint ? ` Context: ${hint}.` : ''}`];
+  if (accompanyingText) {
+    textParts.push(`Accompanying message from the customer (apply its changes/requests on top of the document):\n"""\n${accompanyingText}\n"""`);
+  }
+  textParts.push('Extract the order list(s) from this document.');
   // stream() because base-order tables can be long (SDK caps non-streaming
   // requests by estimated duration)
   const response = await client.messages.stream({
@@ -108,7 +126,7 @@ async function parseOrderDocument(buffer, { mediaType = 'application/pdf', hint 
         role: 'user',
         content: [
           mediaBlock(buffer, mediaType),
-          { type: 'text', text: `Today is ${todayStr} (Israel).${hint ? ` Context: ${hint}.` : ''}\nExtract the order list(s) from this document.` },
+          { type: 'text', text: textParts.join('\n\n') },
         ],
       },
     ],

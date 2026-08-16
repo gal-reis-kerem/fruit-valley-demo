@@ -49,10 +49,10 @@ function parseScheduleFromName(title) {
     const to = DAY_NAMES[range[2]];
     for (let d = from; d <= to; d += 1) days.add(d);
   } else {
-    // beware: "שני" is a substring of "שלישי"? no. but "ראשון"/"שני" can appear
-    // as ordinary words; in this folder they only appear as day names.
+    // day names may be listed ("ראשון שלישי וחמישי") including a ו' prefix
     for (const [name, idx] of Object.entries(DAY_NAMES)) {
-      if (new RegExp(`(^|[\\s\\-])${name}([\\s\\-_.]|$)`).test(clean)) days.add(idx);
+      if (new RegExp(`(^|[\\s\\-]|[\\s\\-]ו)${name}([\\s\\-_.]|$)`).test(clean) ||
+          new RegExp(`^ו${name}([\\s\\-_.]|$)`).test(clean)) days.add(idx);
     }
   }
   return { days: [...days].sort(), isAddition, clean };
@@ -111,28 +111,64 @@ function saveCache(cache) {
   fs.writeFileSync(cacheFile(), JSON.stringify(cache, null, 2));
 }
 
+// Bumped when the doc schema gains fields the sync depends on (sections,
+// Hebrew name) - older cache entries are upgraded lazily, only when needed.
+const PARSER_VERSION = 2;
+
 async function parsePdfCached(entry, hintOffice, cache, { force = false } = {}) {
+  const hint = `הזמנת בסיס קבועה של ${hintOffice}. שם הקובץ: "${entry.title}"`;
+
+  // A Google Sheet inside the fixed folder is a base order too - read as CSV.
+  if (entry.kind === 'sheet') {
+    const csv = await drive.sheetCsv(entry.id);
+    const hash = crypto.createHash('sha1').update(csv).digest('hex');
+    if (!force && cache[hash] && (cache[hash].v || 1) >= PARSER_VERSION) return { ...cache[hash], hash, fromCache: true };
+    log.info(`מפרסר גיליון בסיס: "${entry.title}"`);
+    const { parseTextOrders } = require('../ai/docParser');
+    const parsed = await parseTextOrders(csv, { hint });
+    cache[hash] = { title: entry.title, parsed, v: PARSER_VERSION, at: new Date().toISOString() };
+    saveCache(cache);
+    return { title: entry.title, parsed, hash, fromCache: false };
+  }
+
   const buf = await drive.downloadFile(entry.id);
+  if (!buf.slice(0, 5).toString().startsWith('%PDF')) {
+    throw new Error('הקובץ אינו PDF (זוהה לפי התוכן)');
+  }
   const hash = crypto.createHash('sha1').update(buf).digest('hex');
-  if (!force && cache[hash]) return { ...cache[hash], hash, fromCache: true };
+  const cached = cache[hash];
+  const needsSections = entry.title.includes('+');
+  const stale = cached && (cached.v || 1) < PARSER_VERSION && needsSections;
+  if (!force && cached && !stale) return { ...cached, hash, fromCache: true };
   log.info(`מפרסר קובץ בסיס: "${entry.title}" (${(buf.length / 1024).toFixed(0)}KB)`);
-  const parsed = await parseOrderDocument(buf, {
-    hint: `הזמנת בסיס קבועה של ${hintOffice}. שם הקובץ: "${entry.title}"`,
-  });
-  cache[hash] = { title: entry.title, parsed, at: new Date().toISOString() };
+  const parsed = await parseOrderDocument(buf, { hint });
+  cache[hash] = { title: entry.title, parsed, v: PARSER_VERSION, at: new Date().toISOString() };
   saveCache(cache);
   return { title: entry.title, parsed, hash, fromCache: false };
 }
 
 // Verify the customer named inside the document does not clearly belong to a
 // DIFFERENT customer (e.g. an אינפיניון delivery note inside the בוסטון
-// לומינס folder). Loose containment match; null inside-doc name passes.
-function docCustomerMismatch(docName, office) {
-  if (!docName) return false;
-  const doc = looseName(docName);
-  const candidates = [office.displayName, office.office, office.payer].filter(Boolean).map(looseName);
-  // containment or a single-letter difference passes (typos like אדוארס/אדוארדס)
-  return !candidates.some((c) => c.includes(doc) || doc.includes(c) || withinOneEdit(c, doc));
+// לומינס folder). Uses the model's Hebrew normalization when available
+// (INFINEON -> אינפיניון), plus word-level matching so "בוסטון קיץ" matches
+// "בוסטון לומינס". A null inside-doc name passes.
+function docCustomerMismatch(parsed, office) {
+  const names = [parsed.customer_name_he, parsed.customer_name_in_doc].filter(Boolean);
+  if (!names.length) return false;
+  const candidateWords = [office.displayName, office.office, office.payer]
+    .filter(Boolean)
+    .flatMap((v) => String(v).split(/\s+/))
+    .map(looseName)
+    .filter((w) => w.length >= 3);
+  const candidatesFull = [office.displayName, office.office, office.payer].filter(Boolean).map(looseName);
+  for (const raw of names) {
+    const doc = looseName(raw);
+    if (candidatesFull.some((c) => c.includes(doc) || doc.includes(c) || withinOneEdit(c, doc))) return false;
+    // word-level: any meaningful word shared between doc name and customer name
+    const docWords = String(raw).split(/\s+/).map(looseName).filter((w) => w.length >= 3);
+    if (docWords.some((dw) => candidateWords.some((cw) => cw === dw || withinOneEdit(cw, dw)))) return false;
+  }
+  return true;
 }
 
 /**
@@ -169,10 +205,8 @@ async function syncFixedOrders({ force = false } = {}) {
       for (const child of children) await walk(child, matched, `${label}${entry.title}/`);
       return;
     }
-    if (!/\.pdf$/i.test(entry.title) && entry.kind === 'file') {
-      report.warnings.push(`"${label}${entry.title}" אינו PDF - דולג`);
-      return;
-    }
+    // files are validated by CONTENT (magic bytes) inside parsePdfCached -
+    // renamed files without an extension still load; sheets are read as CSV
 
     // which customers does this FILE feed?
     let targets = scopeOffices;
@@ -197,23 +231,48 @@ async function syncFixedOrders({ force = false } = {}) {
     let doc;
     try {
       doc = await parsePdfCached(entry, targets.map((t) => t.displayName).join(' + '), cache, { force });
+      // Older cache entries lack the Hebrew customer name; when the identity
+      // check would reject on the raw name alone, re-parse once to get it
+      // (INFINEON -> אינפיניון) before deciding.
+      const wouldReject = !combo && targets.every((o) => docCustomerMismatch(doc.parsed, o));
+      if (doc.fromCache && wouldReject && doc.parsed.customer_name_he === undefined) {
+        doc = await parsePdfCached(entry, targets.map((t) => t.displayName).join(' + '), cache, { force: true });
+      }
     } catch (err) {
       report.gaps.push(`פרסור "${entry.title}" נכשל: ${err.message}`);
       return;
     }
     doc.fromCache ? (report.filesCached += 1) : (report.filesParsed += 1);
 
-    const docName = doc.parsed.customer_name_in_doc;
-    const items = (doc.parsed.orders[0] || { items: [] }).items;
-    if (!items.length) {
+    const docName = doc.parsed.customer_name_he || doc.parsed.customer_name_in_doc;
+    const allItems = doc.parsed.orders.flatMap((o) => o.items);
+    if (!allItems.length) {
       report.gaps.push(`"${entry.title}" לא הניב פריטים - לא נטען`);
       return;
     }
+    // Per-customer sections inside the doc (combined "ברוקר + אינמוד" files):
+    // each target office gets ONLY its own section. Falls back to the whole
+    // list when the doc has no sections.
+    const sections = doc.parsed.orders.filter((o) => o.customer_name);
+    const itemsForOffice = (office) => {
+      if (!sections.length) return allItems;
+      const mine = sections.filter((s) => {
+        const sw = String(s.customer_name).split(/\s+/).map(looseName).filter((w) => w.length >= 2);
+        const ow = [office.displayName, office.office, office.payer]
+          .filter(Boolean).flatMap((v) => String(v).split(/\s+/)).map(looseName).filter((w) => w.length >= 2);
+        return sw.some((a) => ow.some((b) => a === b || withinOneEdit(a, b) || a.includes(b) || b.includes(a)));
+      });
+      if (!mine.length) {
+        report.warnings.push(`"${entry.title}": לא נמצאה בקובץ סקציה של ${office.displayName} - נטענת הרשימה המלאה`);
+        return allItems;
+      }
+      return mine.flatMap((s) => s.items);
+    };
 
     for (const office of targets) {
       // a combined filename ("ברוקר + אינמוד") explicitly names its customers -
       // the inside-doc header may mention only one of them
-      if (!combo && docCustomerMismatch(docName, office)) {
+      if (!combo && docCustomerMismatch(doc.parsed, office)) {
         report.gaps.push(
           `"${entry.title}" בתיקייה של ${office.displayName} אך תוכן המסמך נראה של "${docName}" - לא נטען, דורש בדיקה`);
         continue;
@@ -224,12 +283,13 @@ async function syncFixedOrders({ force = false } = {}) {
         report.warnings.push(
           `"${entry.title}": בתוך המסמך מצוינים ימים אחרים (${doc.parsed.days_mentioned.join(', ')}) - שם הקובץ קובע`);
       }
+      const officeItems = itemsForOffice(office);
       const perDay = ensure(office.key);
       for (const d of effectiveDays) {
         if (!perDay[d]) perDay[d] = { base: null, additions: [] };
-        if (isAddition) perDay[d].additions.push({ items, source: entry.title });
+        if (isAddition) perDay[d].additions.push({ items: officeItems, source: entry.title });
         else if (perDay[d].base) report.warnings.push(`ליום ${d} של ${office.displayName} יש יותר מקובץ בסיס אחד - "${entry.title}" דולג`);
-        else perDay[d] = { ...perDay[d], base: { items, source: entry.title } };
+        else perDay[d] = { ...perDay[d], base: { items: officeItems, source: entry.title } };
       }
     }
   };

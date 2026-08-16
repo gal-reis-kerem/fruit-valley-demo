@@ -104,6 +104,44 @@ class Orchestrator {
     return israelNow.getHours() > h || (israelNow.getHours() === h && israelNow.getMinutes() >= m);
   }
 
+  // ---------- item removal (floors-aware, plural-tolerant) ----------
+  // "תסירו את המלפפונים" must remove מלפפון from EVERY floor; a removal that
+  // names a floor removes only there. Hebrew plural/singular forms match.
+  static productStem(name) {
+    const s = String(name || '')
+      .replace(/[׳'"״\s]/g, '')
+      // final letters -> regular forms, so "מלפפון" stems equal to "מלפפונים"
+      .replace(/ך/g, 'כ').replace(/ם/g, 'מ').replace(/ן/g, 'נ').replace(/ף/g, 'פ').replace(/ץ/g, 'צ');
+    return s.replace(/(יות|ים|ות|ה)$/u, '');
+  }
+
+  static productsMatch(a, b) {
+    const sa = Orchestrator.productStem(a);
+    const sb = Orchestrator.productStem(b);
+    if (!sa || !sb) return false;
+    return sa === sb || sa.includes(sb) || sb.includes(sa);
+  }
+
+  // Removes ALL matching items (across floors unless the removal names one).
+  // Returns { removed: [...], notFound: [...] }.
+  static removeItems(items, removals) {
+    const removed = [];
+    const notFound = [];
+    const floorClean = (f) => String(f || '').replace(/[׳'"״\s]/g, '');
+    for (const rem of removals) {
+      const remFloor = floorClean(rem.floor);
+      let hit = false;
+      for (let i = items.length - 1; i >= 0; i -= 1) {
+        if (!Orchestrator.productsMatch(items[i].product_he, rem.product_he)) continue;
+        if (remFloor && !floorClean(items[i].floor).includes(remFloor)) continue;
+        removed.push(...items.splice(i, 1));
+        hit = true;
+      }
+      if (!hit) notFound.push(rem.product_he);
+    }
+    return { removed, notFound };
+  }
+
   // ---------- Step 1-5: incoming customer message ----------
   // forcedCompany: when the sender is a CRM contact of exactly one company,
   // attribution is automatic and the "which company?" question is skipped.
@@ -125,7 +163,7 @@ class Orchestrator {
           log.info('קובץ שכבר עובד התקבל שוב - מדלגת (idempotency)');
           return;
         }
-        const doc = await mediaToText(media, forcedCompany && forcedCompany.crm);
+        const doc = await mediaToText(media, forcedCompany && forcedCompany.crm, body);
         if (doc && doc.manualReview) {
           this.markMediaProcessed(hash);
           this.saveManualReviewFile(media, msg.from);
@@ -354,12 +392,9 @@ class Orchestrator {
       const additions = parsed.items.filter((it) => it.action !== 'remove');
       const removals = parsed.items.filter((it) => it.action === 'remove');
       items = [...base.items];
-      for (const rem of removals) {
-        const idx = items.findIndex((it) => it.product_he.includes(rem.product_he) || rem.product_he.includes(it.product_he));
-        if (idx >= 0) items.splice(idx, 1);
-      }
+      const { removed } = Orchestrator.removeItems(items, removals);
       items.push(...additions);
-      baseAudit = { baseVersion: base.versionId, added: additions.length, removed: removals.length };
+      baseAudit = { baseVersion: base.versionId, added: additions.length, removed: removed.length };
     }
 
     const order = store.createOrder(this.db, {
@@ -422,17 +457,9 @@ class Orchestrator {
       order.items.push({ ...item, addedAfterPrint: printed, addedLate: !printed && late });
     }
 
-    // Remove items by (normalized) Hebrew-name match
-    const removed = [];
-    const notFound = [];
-    for (const rem of removals) {
-      const needle = rem.product_he.trim();
-      const idx = order.items.findIndex(
-        (it) => it.product_he.includes(needle) || needle.includes(it.product_he),
-      );
-      if (idx >= 0) removed.push(...order.items.splice(idx, 1));
-      else notFound.push(needle);
-    }
+    // Remove items floors-wide (or floor-scoped when the removal names one),
+    // tolerant to plural/singular ("מלפפונים" removes every "מלפפון")
+    const { removed, notFound } = Orchestrator.removeItems(order.items, removals);
 
     if (parsed.customer_note) {
       order.customerNote = order.customerNote ? `${order.customerNote} | ${parsed.customer_note}` : parsed.customer_note;
@@ -628,15 +655,25 @@ class Orchestrator {
     // 1) collect parsable content
     const excel = attachments.find((a) => /sheet|excel/i.test(a.contentType) || /\.xlsx?$/i.test(a.filename));
     const pdf = attachments.find((a) => /pdf/i.test(a.contentType) || /\.pdf$/i.test(a.filename));
+    // The email BODY rides along with any attachment - free-text additions
+    // and requests in it ("תוסיפו גם ג'ינג'ר") are applied on top of the file.
     let doc = null;
     try {
       if (excel) {
         const { excelBufferToText } = require('../parsers/registry');
-        doc = await parseTextOrders(excelBufferToText(excel.content), {
-          hint: `קובץ אקסל "${excel.filename}" ממייל של לקוח (נושא: ${subject})`,
+        const combined = [
+          `קובץ אקסל "${excel.filename}" מצורף למייל (נושא: ${subject}):`,
+          excelBufferToText(excel.content),
+          text ? `\nגוף המייל עצמו (החל שינויים/תוספות/בקשות ממנו על הרשימה):\n"""\n${text}\n"""` : '',
+        ].filter(Boolean).join('\n');
+        doc = await parseTextOrders(combined, {
+          hint: `הזמנת מייל של לקוח - אקסל + גוף המייל (נושא: ${subject})`,
         });
       } else if (pdf) {
-        doc = await parseOrderDocument(pdf.content, { hint: `קובץ מצורף למייל (נושא: ${subject})` });
+        doc = await parseOrderDocument(pdf.content, {
+          hint: `קובץ מצורף למייל (נושא: ${subject})`,
+          accompanyingText: text,
+        });
       } else if (text) {
         doc = await parseTextOrders(text, { hint: `גוף מייל הזמנה (נושא: ${subject})` });
       }
@@ -827,16 +864,27 @@ class Orchestrator {
     this.reload();
     if (!msg.hasMedia) return;
 
-    // 1) reply-quote attribution (robust to the _serialized/$1 rename)
+    // 1) reply-quote attribution (robust to the _serialized/$1 rename; the
+    // media hook may deliver a raw stanza id - match on the id tail too)
     let order = null;
     if (msg.hasQuotedMsg) {
       try {
         const quoted = await msg.getQuotedMessage();
         const qid = quoted && quoted.id && (quoted.id._serialized || quoted.id.$1 || null);
         if (qid) {
+          // compare on the stanza part (3rd segment of fromMe_remote_stanza[...]),
+          // which is a long random string - immune to participant suffixes
+          const stanzaOf = (s) => {
+            const parts = String(s).split('_');
+            return parts.length >= 3 ? parts[2] : parts[parts.length - 1];
+          };
+          const qStanza = stanzaOf(qid);
+          const tailMatch = (stored) => stored && (stored === qid || stanzaOf(stored) === qStanza);
           order =
-            this.db.orders.find((o) => o.photoRequestMsgId === qid) ||
-            store.findByGroupMsgId(this.db, qid);
+            this.db.orders.find((o) => tailMatch(o.photoRequestMsgId)) ||
+            store.findByGroupMsgId(this.db, qid) ||
+            this.db.orders.find((o) => tailMatch(o.groupMsgId)) ||
+            null;
         }
       } catch (err) {
         log.warn(`שליפת הודעה מצוטטת נכשלה (${err.message})`);

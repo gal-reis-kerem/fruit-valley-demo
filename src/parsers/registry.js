@@ -52,7 +52,9 @@ async function sharedSheetToText(sheetUrl) {
 //   { doc, provenance }   structured docParser output (PDFs)
 //   { text, provenance }  raw text for the free-text parser (Excel)
 //   { manualReview: reason } / null (not a parseable document)
-async function mediaToText(media, office) {
+// caption: the free-text message sent WITH the file - its changes/requests
+// are applied on top of the document's list.
+async function mediaToText(media, office, caption = '') {
   const mimetype = media.mimetype || '';
   const buffer = Buffer.from(media.data, 'base64');
   try {
@@ -62,7 +64,7 @@ async function mediaToText(media, office) {
       if (office) hintParts.push(`הקובץ הגיע בוואטסאפ מהלקוח ${office.displayName}`);
       const flags = office && office.notesFlags;
       if (flags && flags.pdfSource) hintParts.push(`פורמט צפוי: ייצוא ${flags.pdfSource}`);
-      const doc = await parseOrderDocument(buffer, { hint: hintParts.join('. ') });
+      const doc = await parseOrderDocument(buffer, { hint: hintParts.join('. '), accompanyingText: caption });
       if (!doc.orders.length || !doc.orders.some((o) => o.items.length)) {
         return { manualReview: 'לא זוהו פריטי הזמנה ב-PDF - נדרשת בדיקה ידנית' };
       }

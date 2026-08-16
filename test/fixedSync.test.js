@@ -15,6 +15,9 @@ test('לוז משם קובץ: יום בודד, טווח, תוספת, בלי יו
   assert.deepStrictEqual(parseScheduleFromName('אינמוד - רביעי - תוספת.pdf').days, [3]);
   assert.strictEqual(parseScheduleFromName('אינמוד - רביעי - תוספת.pdf').isAddition, true);
   assert.deepStrictEqual(parseScheduleFromName('רחובות מעודן שני-חמישי (1).pdf').days, [1, 2, 3, 4]);
+  // רשימת ימים כולל ו' החיבור ("ראשון שלישי וחמישי")
+  assert.deepStrictEqual(parseScheduleFromName('בוסטון - ראשון שלישי וחמישי.pdf').days, [0, 2, 4]);
+  assert.deepStrictEqual(parseScheduleFromName('בוסטון - שני ורביעי.pdf').days, [1, 3]);
   // no day token -> empty (caller applies WORK_DAYS)
   assert.deepStrictEqual(parseScheduleFromName('גליל מדיקל.pdf').days, []);
   assert.deepStrictEqual(parseScheduleFromName('מודיעין מעודכן קיץ 26 (1).pdf').days, []);
