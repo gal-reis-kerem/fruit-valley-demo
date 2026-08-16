@@ -187,11 +187,12 @@ class Orchestrator {
           }
           if (!company) {
             const candidates = (contactCandidates && contactCandidates.length ? contactCandidates : null) || config.companies;
-            this.pendingEmail = { doc: doc.doc, payload: { from: 'whatsapp', subject: 'קובץ PDF' }, candidates, at: Date.now() };
+            this.pendingEmail = { doc: doc.doc, payload: { from: 'whatsapp', subject: 'קובץ PDF', media }, candidates, at: Date.now() };
             const options = candidates.slice(0, 8).map((c) => c.name).join(' / ');
             await this.safeReply(msg, `קיבלתי את הקובץ! רק לאיזה לקוח הוא שייך - ${options}? 🙏`);
             return;
           }
+          this.saveIncomingFile(media, company.name);
           await this.safeReply(msg, `קיבלתי את הקובץ של ${company.name}, מעבדת אותו 🙌`);
           return this.createOrdersFromDoc(company, doc.doc, `PDF בוואטסאפ${body ? `: ${body.slice(0, 60)}` : ''}`);
         }
@@ -229,8 +230,9 @@ class Orchestrator {
       if (hit.length === 1) {
         const { doc, payload } = this.pendingEmail;
         this.pendingEmail = null;
-        bus.naama(`הנציג ענה: ${hit[0].name} — משייכת את הזמנת המייל`);
-        await this.safeReply(msg, `תודה! משייכת את הזמנת המייל ל${hit[0].name} 🙌`);
+        bus.naama(`הנציג ענה: ${hit[0].name} — משייכת את ההזמנה`);
+        if (payload.media) this.saveIncomingFile(payload.media, hit[0].name);
+        await this.safeReply(msg, `תודה! משייכת את ההזמנה ל${hit[0].name} 🙌`);
         return this.createOrdersFromDoc(hit[0], doc, `מייל מ-${payload.from}: ${payload.subject}`);
       }
       // anything else falls through to normal handling (the email stays held)
@@ -1012,6 +1014,26 @@ class Orchestrator {
     if (list.length > 500) list = list.slice(-300);
     fs.mkdirSync(config.dataDir, { recursive: true });
     fs.writeFileSync(file, JSON.stringify(list));
+  }
+
+  // The customer's ORIGINAL file (e.g. a Restigo/Zest PDF) is saved into the
+  // customer's folder next to our own picking sheets - audit trail + the
+  // local copy the parse worked from.
+  saveIncomingFile(media, customerName) {
+    try {
+      const dir = path.join(config.outputDir, customerName, 'incoming');
+      fs.mkdirSync(dir, { recursive: true });
+      const ext = (media.mimetype || 'application/pdf').split('/')[1].split(';')[0];
+      const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+      const base = media.filename ? media.filename.replace(/[/\\]/g, '_') : `הזמנה-${stamp}.${ext}`;
+      const filePath = path.join(dir, `${stamp}-${base}`);
+      fs.writeFileSync(filePath, Buffer.from(media.data, 'base64'));
+      log.info(`הקובץ המקורי נשמר: ${filePath}`);
+      return filePath;
+    } catch (err) {
+      log.error('שמירת הקובץ המקורי נכשלה:', err.message);
+      return null;
+    }
   }
 
   // Unreadable originals are kept with their metadata for later inspection

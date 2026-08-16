@@ -275,6 +275,43 @@ async function launchClient(attempt) {
       try {
         const chatId = msg.from;
         const isGroup = chatId.endsWith('@g.us');
+
+        // Media messages arrive here BROKEN on the pinned version (body = the
+        // file name, media fields unreadable). Never process them as text -
+        // the page hook owns them; after a grace period, try wwebjs's own
+        // download as a fallback layer.
+        const isMediaMsg = msg.hasMedia || ['image', 'video', 'document', 'sticker', 'ptt', 'audio'].includes(msg.type);
+        if (isMediaMsg) {
+          log.info(`הודעת מדיה (${msg.type || 'לא ידוע'}) - ממתין להוק הדף לקלוט אותה`);
+          setTimeout(async () => {
+            try {
+              const key = `media|${chatId}|${msg.timestamp}`;
+              if (processedMsgs.has(key)) return; // page hook handled it
+              log.warn('הוק הדף לא קלט את המדיה תוך 20 שניות - מנסה הורדה דרך הספרייה');
+              const media = await msg.downloadMedia().catch(() => null);
+              if (media && media.data && state.routeMediaPayload) {
+                await state.routeMediaPayload({
+                  msgId: (msg.id && (msg.id._serialized || msg.id.$1)) || `fallback_${msg.timestamp}`,
+                  chatId,
+                  senderId: msg.author || null,
+                  timestamp: msg.timestamp,
+                  type: msg.type || 'document',
+                  mimetype: media.mimetype || 'application/octet-stream',
+                  filename: media.filename || null,
+                  caption: msg.body && !/\.(pdf|xlsx?|jpe?g|png)$/i.test(msg.body.trim()) ? msg.body : '',
+                  quotedId: null,
+                  dataB64: media.data,
+                }, 'גיבוי הספרייה');
+              } else {
+                log.error('המדיה לא נקלטה בשתי השכבות - הקובץ לא טופל. שלחו את התוכן כטקסט או דווחו ל-Triple');
+              }
+            } catch (err) {
+              log.error('שכבת הגיבוי למדיה נכשלה:', err.message);
+            }
+          }, 20000);
+          return;
+        }
+
         if (msg.timestamp) markProcessed(`${chatId}|${msg.timestamp}`);
         writeSettings({ lastSeenTs: Date.now() });
 
@@ -306,60 +343,64 @@ async function launchClient(attempt) {
       }
     });
 
-    // Media messages (PDFs, photos): wwebjs's 'message' event never fires for
-    // them on the pinned version, so a page hook downloads the file in-page
-    // and hands us plain data. Routed exactly like a regular message.
+    // Media messages (PDFs, photos): on the pinned version wwebjs's 'message'
+    // event fires for them WITHOUT the media (body = the file name, hasMedia
+    // broken). The page hook downloads the file in-page via WhatsApp's own
+    // DownloadManager and hands us plain data; a wwebjs downloadMedia call is
+    // the fallback layer. Both funnel into routeMediaPayload; dedup runs on a
+    // dedicated `media|` key so the text event never shadows the file.
+    const mediaKey = (chatId, timestamp) => `media|${chatId}|${timestamp}`;
+    const routeMediaPayload = async (payload, via) => {
+      if (!payload || !payload.dataB64) return;
+      const key = mediaKey(payload.chatId, payload.timestamp);
+      if (processedMsgs.has(key)) return; // the other layer already handled it
+      markProcessed(key);
+      writeSettings({ lastSeenTs: Date.now() });
+      log.info(`מדיה נקלטה (${via}): ${payload.type} (${payload.filename || payload.mimetype})${payload.caption ? ` + טקסט "${payload.caption.slice(0, 40)}"` : ''}`);
+
+      const pseudoMsg = {
+        id: { _serialized: payload.msgId },
+        from: payload.chatId,
+        author: payload.senderId,
+        body: payload.caption || '',
+        hasMedia: true,
+        type: payload.type,
+        timestamp: payload.timestamp,
+        hasQuotedMsg: Boolean(payload.quotedId),
+        getQuotedMessage: async () => ({ id: { _serialized: payload.quotedId } }),
+        downloadMedia: async () => ({
+          mimetype: payload.mimetype,
+          data: payload.dataB64,
+          filename: payload.filename,
+        }),
+        reply: async (text) => client.sendMessage(payload.chatId, text),
+        react: async () => {},
+      };
+
+      const isGroup = payload.chatId.endsWith('@g.us');
+      if (isGroup) {
+        const inPickingGroup = payload.chatId === pickingGroup.id._serialized;
+        const inPhotosGroup = photosGroup && payload.chatId === photosGroup.id._serialized;
+        if (inPickingGroup || inPhotosGroup) await flow.handleGroupMedia(pseudoMsg);
+        return;
+      }
+      const phoneId = await resolvePhoneId(client, payload.chatId);
+      const crmCompanies = sheets.contactCompanies(phoneId);
+      const isRep = phoneId === config.sourceContactId;
+      if (!isRep && !crmCompanies.length) return;
+      const forcedCompany = !isRep && crmCompanies.length === 1 ? crmCompanies[0] : null;
+      const candidates = crmCompanies.length > 1 ? crmCompanies : null;
+      await flow.handleCustomerMessage(pseudoMsg, forcedCompany, candidates);
+    };
+    state.routeMediaPayload = routeMediaPayload;
+
     try {
-      await installMediaHook(client, async (payload) => {
-        try {
-          if (!payload || !payload.msgId) return;
-          const key = `${payload.chatId}|${payload.timestamp}`;
-          if (processedMsgs.has(key)) return; // wwebjs somehow handled it already
-          markProcessed(key);
-          writeSettings({ lastSeenTs: Date.now() });
-
-          if (!payload.dataB64) {
-            log.warn(`קובץ מדיה התקבל אך ההורדה נכשלה (${payload.error}) - מדלג`);
-            return;
-          }
-          log.info(`מדיה נקלטה מהדף: ${payload.type} (${payload.filename || payload.mimetype})${payload.caption ? ` + טקסט "${payload.caption.slice(0, 40)}"` : ''}`);
-
-          const pseudoMsg = {
-            id: { _serialized: payload.msgId },
-            from: payload.chatId,
-            author: payload.senderId,
-            body: payload.caption || '',
-            hasMedia: true,
-            type: payload.type,
-            timestamp: payload.timestamp,
-            hasQuotedMsg: Boolean(payload.quotedId),
-            getQuotedMessage: async () => ({ id: { _serialized: payload.quotedId } }),
-            downloadMedia: async () => ({
-              mimetype: payload.mimetype,
-              data: payload.dataB64,
-              filename: payload.filename,
-            }),
-            reply: async (text) => client.sendMessage(payload.chatId, text),
-            react: async () => {},
-          };
-
-          const isGroup = payload.chatId.endsWith('@g.us');
-          if (isGroup) {
-            const inPickingGroup = payload.chatId === pickingGroup.id._serialized;
-            const inPhotosGroup = photosGroup && payload.chatId === photosGroup.id._serialized;
-            if (inPickingGroup || inPhotosGroup) await flow.handleGroupMedia(pseudoMsg);
-            return;
-          }
-          const phoneId = await resolvePhoneId(client, payload.chatId);
-          const crmCompanies = sheets.contactCompanies(phoneId);
-          const isRep = phoneId === config.sourceContactId;
-          if (!isRep && !crmCompanies.length) return;
-          const forcedCompany = !isRep && crmCompanies.length === 1 ? crmCompanies[0] : null;
-          const candidates = crmCompanies.length > 1 ? crmCompanies : null;
-          await flow.handleCustomerMessage(pseudoMsg, forcedCompany, candidates);
-        } catch (err) {
-          log.error('שגיאה בטיפול במדיה:', err);
+      await installMediaHook(client, (payload) => {
+        if (payload && !payload.dataB64) {
+          log.warn(`קובץ מדיה התקבל אך ההורדה בדף נכשלה (${payload.error}) - שכבת הגיבוי תנסה`);
+          return;
         }
+        routeMediaPayload(payload, 'הוק הדף').catch((err) => log.error('שגיאה בטיפול במדיה:', err));
       });
     } catch (err) {
       log.error('התקנת הוק המדיה נכשלה:', err.message);

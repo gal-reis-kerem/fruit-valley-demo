@@ -236,7 +236,9 @@ async function installMediaHook(client, onMedia) {
     const download = async (m) => {
       const dmMod = window.require('WAWebDownloadManager');
       const dm = dmMod.downloadManager || dmMod.default || dmMod;
-      const buf = await dm.downloadAndMaybeDecrypt({
+      const fn = dm.downloadAndMaybeDecrypt || dm.downloadAndDecrypt || dm.download;
+      if (!fn) throw new Error('DownloadManager method not found');
+      const buf = await fn.call(dm, {
         directPath: m.directPath,
         encFilehash: m.encFilehash,
         filehash: m.filehash,
