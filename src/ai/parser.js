@@ -22,7 +22,7 @@ const buildOrderSchema = () => ({
         { type: 'null' },
       ],
       description:
-        'The company this order belongs to, EXACTLY as listed. The rep orders for several companies — detect from phrases like "הזמנה לטריפל", "עבור כרם קפיטל", or a company name anywhere in the message (any spelling/Hebrew/English variation maps to the listed name). null if the message does not indicate a company.',
+        'The company this order belongs to, EXACTLY as listed. The rep orders for several companies — detect from phrases like "הזמנה לטריפל", "עבור כרם קפיטל", or a company name anywhere in the message (any spelling/Hebrew/English variation maps to the listed name). null if the message does not indicate a company. CRITICAL: some payers have SEVERAL offices in the list (e.g. "סולאראדג׳ הרצליה" / "סולאראדג׳ ציפורית" / "סולאראדג׳ מודיעין"). If the message names only the payer ("הזמנה לסולאראדג׳") WITHOUT identifying the office, return null — NEVER pick an office by guess.',
     },
     reply_text: {
       type: 'string',

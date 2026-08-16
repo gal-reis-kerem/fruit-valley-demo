@@ -68,6 +68,21 @@ class Orchestrator {
     return config.companies.map((c) => c.name).join(' / ');
   }
 
+  // A payer with several offices (סולאראדג׳ הרצליה/ציפורית/מודיעין) must never
+  // be resolved to a specific office by guesswork. Returns the sibling list
+  // when the chosen company's office is NOT named in the message itself -
+  // the caller then asks which office. null = attribution is safe.
+  ambiguousOffice(company, text) {
+    const crm = company && company.crm;
+    if (!crm || !crm.payer) return null;
+    const siblings = config.companies.filter((c) => c.crm && c.crm.payer === crm.payer);
+    if (siblings.length <= 1) return null;
+    const clean = (s) => String(s || '').toLowerCase().replace(/[׳'"״\s]/g, '');
+    const t = clean(text);
+    if (crm.office && t.includes(clean(crm.office))) return null; // office named explicitly
+    return siblings;
+  }
+
   save() {
     store.saveDB(this.db);
   }
@@ -305,6 +320,20 @@ class Orchestrator {
     // CRM contact is attributed automatically.
     const company =
       forcedCompany || this.findCompany(parsed.company) || this.matchCompanyByText(parsed.company || '');
+
+    // Guard: the parser may have "resolved" a payer-only mention to a specific
+    // office (e.g. "הזמנה לסולאראדג׳" -> ציפורית). If the office is not named
+    // in the message itself - ask which office, never assume.
+    if (company && !forcedCompany && ['new_order', 'addition', 'change', 'cancellation'].includes(parsed.classification)) {
+      const siblings = this.ambiguousOffice(company, effectiveBody);
+      if (siblings) {
+        this.pending = { parsed, rawBody: body, at: Date.now(), candidates: siblings };
+        const offices = siblings.map((c) => c.crm.office).join(' / ');
+        bus.naama(`ההודעה מציינת את ${company.crm.payer} בלי משרד — שואלת לאיזה משרד ההזמנה`);
+        return this.safeReply(msg, `קיבלתי! לאיזה משרד של ${company.crm.payer} ההזמנה - ${offices}? 🙏`);
+      }
+    }
+
     if (!company) {
       // An addition/change/cancellation with exactly one open order overall
       // attaches to it without nagging the rep.

@@ -52,3 +52,23 @@ test('מוצר שלא נמצא מדווח ב-notFound ולא מפיל כלום',
   assert.deepStrictEqual(notFound, ['אבטיח']);
   assert.strictEqual(items.length, 1);
 });
+
+test('לקוח משלם עם כמה משרדים: בלי ציון משרד בהודעה - שואלים, לא מניחים', () => {
+  const { config } = require('../src/config');
+  config.companies.length = 0;
+  config.companies.push(
+    { name: 'סולאראדג׳ הרצליה', crm: { payer: 'סולאראדג׳', office: 'הרצליה' } },
+    { name: 'סולאראדג׳ ציפורית', crm: { payer: 'סולאראדג׳', office: 'ציפורית' } },
+    { name: 'סולאראדג׳ מודיעין', crm: { payer: 'סולאראדג׳', office: 'מודיעין' } },
+    { name: 'אלמה', crm: { payer: null, office: 'אלמה' } },
+  );
+  const flow = new Orchestrator({}, { pickingGroup: { id: { _serialized: 'x' }, name: 'x' }, photosGroup: null });
+  const solar = config.companies[1]; // המודל "בחר" ציפורית
+  // ההודעה מזכירה רק את הלקוח המשלם -> חייבים לשאול (3 מועמדים)
+  const amb = flow.ambiguousOffice(solar, 'הזמנה סולראדג׳: 2 קילו מלפפונים');
+  assert.ok(amb && amb.length === 3);
+  // המשרד נקוב בהודעה -> שיוך בטוח
+  assert.strictEqual(flow.ambiguousOffice(solar, 'הזמנה לסולראדג׳ ציפורית: מלפפונים'), null);
+  // לקוח בלי לקוח משלם -> אין דו-משמעות
+  assert.strictEqual(flow.ambiguousOffice(config.companies[3], 'הזמנה לאלמה'), null);
+});
