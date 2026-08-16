@@ -683,7 +683,11 @@ async function resumeDay() {
   dp.value = new Date().toLocaleDateString('en-CA');
   dp.onchange = refreshCustomers;
 
-  const { settings, conn, qrDataUrl } = await api.getBoot();
+  const { settings, conn, qrDataUrl, version } = await api.getBoot();
+  if (version) {
+    const v = document.getElementById('code-ver');
+    if (v) v.textContent = `גרסה ${version}`;
+  }
   if (settings.businessPhone) document.getElementById('biz-phone').value = settings.businessPhone;
   if (settings.sheetUrl) document.getElementById('sheet-url').value = settings.sheetUrl;
   if (settings.portalUrl) document.getElementById('portal-url').value = settings.portalUrl;

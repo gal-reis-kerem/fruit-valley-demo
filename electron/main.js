@@ -92,6 +92,7 @@ ipcMain.handle('get-boot', async () => ({
   settings: readSettings(),
   conn: connSnapshot(),
   companies: config.companies.map((c) => c.name),
+  version: require('../src/version').getVersion().label,
   qrDataUrl: engine.state.qr ? await QRCode.toDataURL(engine.state.qr, { width: 360, margin: 1 }) : null,
 }));
 ipcMain.handle('get-conn', () => connSnapshot());

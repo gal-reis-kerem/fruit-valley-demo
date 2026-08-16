@@ -444,7 +444,7 @@ async function start({ cli = false, webPanel = true } = {}) {
     return fatal('חסר PICKING_GROUP_NAME בקובץ .env (שם קבוצת הליקוט בוואטסאפ).');
   }
 
-  log.info('מפעיל את פירות העמק — Triple Digital Workforce…');
+  log.info(`מפעיל את פירות העמק — Triple Digital Workforce… [גרסת קוד: ${require('./version').getVersion().label}]`);
   log.info(`נציג: ${config.sourceContact} | חברות: ${config.companies.map((c) => c.name).join(' / ')}`);
 
   const keyCheck = await require('./ai/parser').checkApiKey();
