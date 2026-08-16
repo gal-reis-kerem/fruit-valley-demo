@@ -12,7 +12,11 @@ function normalizePhone(raw) {
 const ROOT = path.resolve(__dirname, '..');
 
 const config = {
-  anthropicModel: process.env.ANTHROPIC_MODEL || 'claude-opus-4-8',
+  // Model split: free-text parsing and worker chat run on Sonnet (fast,
+  // ~60% cheaper); document reading (PDFs, scans, floor matrices, Excel/sheet
+  // tables) stays on Opus where the vision/table work is hardest.
+  anthropicModel: process.env.ANTHROPIC_MODEL || 'claude-sonnet-5',
+  anthropicDocModel: process.env.ANTHROPIC_DOC_MODEL || 'claude-opus-4-8',
   sourceContact: normalizePhone(process.env.SOURCE_CONTACT_NUMBER || '0557118125'),
   sourceContactId: normalizePhone(process.env.SOURCE_CONTACT_NUMBER || '0557118125') + '@c.us',
   // The source contact is a REPRESENTATIVE who orders on behalf of several

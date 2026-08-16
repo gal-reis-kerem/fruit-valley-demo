@@ -129,18 +129,39 @@ Rules:
 - reply_text: write the WhatsApp reply we send back to the customer. Sound like a friendly human coordinator, in casual Hebrew, 1-2 short sentences, at most one emoji. Include the token {{ORDER}} exactly once (it is replaced with the order number). Examples of tone (do NOT copy verbatim, invent your own variation each time): "קיבלתי 🙌 ההזמנה יצאה לליקוט, מספר הזמנה {{ORDER}}", "מעולה, הכל נקלט! ההזמנה שלך ({{ORDER}}) כבר אצל המלקטים". For additions: acknowledge the addition and mention it joined order {{ORDER}}. Mirror the customer's energy (if they are brief - be brief).
 - EXCEPTION - company is null on an order/addition/change: reply_text must instead ASK naturally which company the order is for, listing the options, WITHOUT the {{ORDER}} token (e.g. "קיבלתי! רק לאיזו חברה ההזמנה - כרם קפיטל, טריפל או סולראדג'?").\n- If delivery_date is NOT tomorrow (an explicit future/other date was requested), reply_text must mention the delivery day explicitly (e.g. "רשמתי ליום שלישי 28.7") so mistakes get caught early.\n- Complaints: if the customer complains about a past order ("פעם שעברה הגיע לא טוב", "שכחתם את...", "איחרתם במשלוח") set complaint accordingly, and open reply_text with a short empathetic acknowledgement (התנצלות קצרה + זה הועבר לטיפול) before the order confirmation.`;
 
+// A degraded parse: empty product names, or an order-type classification
+// with no items at all. Seen occasionally on the fast text model with this
+// large schema - the doc model then takes one clean retry.
+function isDegraded(parsed) {
+  if ((parsed.items || []).some((it) => !String(it.product_he || '').trim())) return true;
+  return ['new_order', 'addition', 'change'].includes(parsed.classification) && !(parsed.items || []).length;
+}
+
 /**
  * Parse a raw WhatsApp message into a structured order.
+ * Runs on the fast text model; a degraded result is retried once on the
+ * document model before being returned.
  * @param {string} messageText raw message body
  * @param {Date} now reference time for resolving relative dates
  * @returns {Promise<object>} object matching ORDER_SCHEMA
  */
 async function parseOrderMessage(messageText, now = new Date()) {
+  let parsed = await parseOnce(messageText, now, config.anthropicModel);
+  if (isDegraded(parsed) && config.anthropicDocModel !== config.anthropicModel) {
+    console.log(`[parser] פלט פגום מ-${config.anthropicModel} - מנסה שוב על ${config.anthropicDocModel}`);
+    parsed = await parseOnce(messageText, now, config.anthropicDocModel);
+  }
+  // never let an empty-name item reach the picking sheet
+  parsed.items = (parsed.items || []).filter((it) => String(it.product_he || '').trim());
+  return parsed;
+}
+
+async function parseOnce(messageText, now, model) {
   const todayStr = now.toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' }); // YYYY-MM-DD
   const dayName = now.toLocaleDateString('he-IL', { weekday: 'long', timeZone: 'Asia/Jerusalem' });
 
   const response = await client.messages.create({
-    model: config.anthropicModel,
+    model,
     max_tokens: 16000,
     system: [
       {
@@ -169,6 +190,11 @@ ${messageText}
     throw new Error('Model refused to process the message');
   }
   const text = response.content.find((b) => b.type === 'text');
+  if (process.env.FV_PARSE_DEBUG) {
+    console.log('[FV_PARSE_DEBUG] stop:', response.stop_reason, '| out:', response.usage && response.usage.output_tokens,
+      '| blocks:', response.content.map((b) => b.type).join(','));
+    console.log('[FV_PARSE_DEBUG] text:', (text && text.text || '').slice(0, 900));
+  }
   if (!text) throw new Error('No text block in model response');
   return JSON.parse(text.text);
 }

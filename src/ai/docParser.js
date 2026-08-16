@@ -117,7 +117,7 @@ async function parseOrderDocument(buffer, { mediaType = 'application/pdf', hint 
   // stream() because base-order tables can be long (SDK caps non-streaming
   // requests by estimated duration)
   const response = await client.messages.stream({
-    model: config.anthropicModel,
+    model: config.anthropicDocModel,
     max_tokens: 32000,
     system: [{ type: 'text', text: DOC_SYSTEM, cache_control: { type: 'ephemeral' } }],
     output_config: { format: { type: 'json_schema', schema: buildDocSchema() } },
@@ -145,7 +145,7 @@ async function parseTextOrders(text, { hint = '' } = {}) {
   const now = new Date();
   const todayStr = now.toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' });
   const response = await client.messages.stream({
-    model: config.anthropicModel,
+    model: config.anthropicDocModel,
     max_tokens: 32000,
     system: [{ type: 'text', text: DOC_SYSTEM, cache_control: { type: 'ephemeral' } }],
     output_config: { format: { type: 'json_schema', schema: buildDocSchema() } },
