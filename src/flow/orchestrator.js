@@ -12,6 +12,7 @@ const complaints = require('../complaints');
 const baseOrders = require('../orders/baseOrders');
 const crypto = require('crypto');
 const { mediaToText } = require('../parsers/registry');
+const { parseOrderDocument, parseTextOrders } = require('../ai/docParser');
 
 /**
  * The core business flow (PRD "זרימת המוצר המרכזית", steps 1-8):
@@ -32,6 +33,8 @@ class Orchestrator {
     this.db = store.loadDB();
     // A parsed order waiting for the rep to answer "which company?"
     this.pending = null; // { parsed, rawBody, at }
+    // An email order waiting for the rep to say which office it belongs to
+    this.pendingEmail = null; // { doc, payload, candidates, at }
   }
 
   // ---------- company resolution (the rep orders for several companies) ----
@@ -130,6 +133,30 @@ class Orchestrator {
           await this.safeReply(msg, `קיבלתי את הקובץ, אבל לא הצלחתי לקרוא אותו אוטומטית (${doc.manualReview}). נציג אנושי יטפל בו 🙏`);
           return;
         }
+        if (doc && doc.doc) {
+          // A structured PDF order (Restigo/Zest/delivery-note/scan) - the
+          // document parser already produced clean items.
+          this.markMediaProcessed(hash);
+          bus.naama(`קיבלתי PDF — קראתי אותו (${doc.doc.orders.reduce((n, o) => n + o.items.length, 0)} פריטים)`);
+          let company = forcedCompany;
+          if (!company && doc.doc.customer_name_in_doc) {
+            const hits = this.matchCompaniesByText(doc.doc.customer_name_in_doc);
+            if (hits.length === 1) company = hits[0];
+          }
+          if (!company && body) {
+            const hits = this.matchCompaniesByText(body);
+            if (hits.length === 1) company = hits[0];
+          }
+          if (!company) {
+            const candidates = (contactCandidates && contactCandidates.length ? contactCandidates : null) || config.companies;
+            this.pendingEmail = { doc: doc.doc, payload: { from: 'whatsapp', subject: 'קובץ PDF' }, candidates, at: Date.now() };
+            const options = candidates.slice(0, 8).map((c) => c.name).join(' / ');
+            await this.safeReply(msg, `קיבלתי את הקובץ! רק לאיזה לקוח הוא שייך - ${options}? 🙏`);
+            return;
+          }
+          await this.safeReply(msg, `קיבלתי את הקובץ של ${company.name}, מעבדת אותו 🙌`);
+          return this.createOrdersFromDoc(company, doc.doc, `PDF בוואטסאפ${body ? `: ${body.slice(0, 60)}` : ''}`);
+        }
         if (doc && doc.text) {
           this.markMediaProcessed(hash);
           provenance = doc.provenance;
@@ -153,6 +180,42 @@ class Orchestrator {
       }
     }
     if (!effectiveBody) return;
+
+    // Is this the answer to "which customer does the EMAIL order belong to?"
+    if (this.pendingEmail) {
+      const hit = this.pendingEmail.candidates.filter((c) => {
+        const clean = (s) => String(s || '').toLowerCase().replace(/[׳'"״]/g, '');
+        const b = clean(body);
+        return [c.name, ...(c.aliases || [])].some((n) => n && b.includes(clean(n)));
+      });
+      if (hit.length === 1) {
+        const { doc, payload } = this.pendingEmail;
+        this.pendingEmail = null;
+        bus.naama(`הנציג ענה: ${hit[0].name} — משייכת את הזמנת המייל`);
+        await this.safeReply(msg, `תודה! משייכת את הזמנת המייל ל${hit[0].name} 🙌`);
+        return this.createOrdersFromDoc(hit[0], doc, `מייל מ-${payload.from}: ${payload.subject}`);
+      }
+      // anything else falls through to normal handling (the email stays held)
+    }
+
+    // A sheet-channel customer letting us know their sheet was updated
+    // ("עדכנתי את הטבלה") triggers an immediate re-read of their sheet.
+    if (/עדכנ|שיטס|טבלה|גיליון/.test(body)) {
+      const sheetCompanies = config.companies.filter((c) => c.crm && c.crm.channel === 'sheet');
+      const target =
+        (forcedCompany && forcedCompany.crm && forcedCompany.crm.channel === 'sheet' && forcedCompany) ||
+        (() => {
+          const hits = this.matchCompaniesByText(body).filter((c) => sheetCompanies.includes(c));
+          return hits.length === 1 ? hits[0] : null;
+        })();
+      if (target) {
+        bus.naama(`${target.name} עדכנו שהגיליון השתנה — קוראת אותו עכשיו`);
+        await this.safeReply(msg, `מעולה, בודקת את הגיליון של ${target.name} עכשיו 👀`);
+        const sheetOrders = require('../orders/sheetOrders');
+        await sheetOrders.pollOnce(() => this, { forceOffice: target.crm.key });
+        return;
+      }
+    }
 
     // Is this the answer to a pending "which company?" question?
     if (this.pending) {
@@ -225,11 +288,13 @@ class Orchestrator {
       bus.naama(candidates
         ? `שיוך לא חד-משמעי (${candidates.length} אפשרויות) — שואלת את הלקוח`
         : 'לא צוין לקוח — שואלת את הלקוח לאיזה לקוח ההזמנה');
-      const options = (candidates || config.companies).slice(0, 8).map((c) => c.name).join(' / ');
+      const pool = candidates || config.companies;
+      const options = pool.slice(0, 8).map((c) => c.name).join(' / ');
+      const more = pool.length > 8 ? ' (או כתבו את שם הלקוח)' : '';
       const question =
         !candidates && parsed.reply_text && !parsed.reply_text.includes('{{ORDER}}')
           ? parsed.reply_text
-          : `קיבלתי! לאיזה לקוח שייכת ההזמנה - ${options}? 🙏`;
+          : `קיבלתי! לאיזה לקוח שייכת ההזמנה - ${options}?${more} 🙏`;
       return this.safeReply(msg, question);
     }
 
@@ -455,6 +520,177 @@ class Orchestrator {
       `🚫 *הזמנה ${order.id} (${order.customerName}) בוטלה* - נא לא ללקט.`,
       order.groupMsgId ? { quotedMessageId: order.groupMsgId } : {},
     );
+  }
+
+  // ---------- non-WhatsApp channels: schedule / sheet / email ----------
+
+  // Shared creation path for orders born outside a WhatsApp chat.
+  // replaceExisting: an open order for the same date is REPLACED wholesale
+  // (the source - a sheet - is the single source of truth), otherwise the new
+  // content is refused when an open order exists.
+  async createChannelOrder(company, { deliveryDate, items, customerNote = null, sourceChannel, sourceFormat, rawMessage, baseAudit = null, replaceExisting = false }) {
+    const crm = company.crm || {};
+    const existing = store.findOpenOrderForDate(this.db, company.name, deliveryDate);
+    if (existing) {
+      if (!replaceExisting) return { order: existing, created: false };
+      existing.items = items;
+      if (customerNote) existing.customerNote = customerNote;
+      existing.version += 1;
+      store.addHistory(existing, 'channel_update', `תוכן ההזמנה הוחלף מעדכון ${sourceChannel} (גרסה ${existing.version})`);
+      this.save();
+      await this.sendPickingSheet(existing, { updated: true });
+      return { order: existing, created: false, updated: true };
+    }
+    const order = store.createOrder(this.db, {
+      deliveryDate,
+      customerName: company.name,
+      customerNameEn: company.nameEn,
+      initials: company.initials,
+      customerNote,
+      locationDetail: null,
+      items,
+      rawMessage,
+    });
+    order.displayMode = crm.displayMode;
+    order.sourceChannel = sourceChannel;
+    order.sourceFormat = sourceFormat;
+    if (baseAudit) {
+      order.baseAudit = baseAudit;
+      store.addHistory(order, 'base_order_applied', `בסיס ${baseAudit.baseVersion} (הנפקה לפי לוז)`);
+    }
+    if (crm.displayMode === 'floors' && !order.items.some((it) => it.floor)) {
+      order.flags = [...(order.flags || []), 'floors_missing'];
+      store.addHistory(order, 'manual_review', 'לקוח בחלוקה לקומות אך לא זוהו קומות בקלט');
+      bus.naama(`אזהרה: ${company.name} מוגדר בחלוקה לקומות אך לא זוהו קומות — סומן לבדיקה`);
+    }
+    this.save();
+    await this.sendPickingSheet(order);
+    return { order, created: true };
+  }
+
+  // Scheduled issuance of a fixed order (called by the scheduler on the
+  // customer's own delivery days only).
+  async issueScheduledOrder(company, deliveryDate) {
+    this.reload();
+    const crm = company.crm;
+    const existing = store.findOpenOrderForDate(this.db, company.name, deliveryDate);
+    if (existing) return existing; // the customer beat the schedule via WhatsApp
+    const base = baseOrders.baseFor(crm.key, deliveryDate);
+    if (!base) throw new Error(`אין הזמנת בסיס של ${company.name} ליום זה`);
+    bus.naama(`מנפיקה הזמנה קבועה של ${company.name} לפי הלוז — ${base.items.length} פריטים`, true);
+    const { order } = await this.createChannelOrder(company, {
+      deliveryDate,
+      items: base.items,
+      sourceChannel: 'fixed_schedule',
+      sourceFormat: 'db',
+      rawMessage: `הזמנה קבועה שהונפקה אוטומטית לפי הלוז (בסיס ${base.versionId})`,
+      baseAudit: { baseVersion: base.versionId, added: 0, removed: 0, scheduled: true },
+    });
+    return order;
+  }
+
+  // An updated shared Google Sheet: the table content IS the order.
+  async handleSheetOrder(company, tableText, { sheetTitle = '' } = {}) {
+    this.reload();
+    const crm = company.crm || {};
+    const floorsHint = crm.displayMode === 'floors'
+      ? ' הלקוח עובד בחלוקה לקומות: עמודות כמות נפרדות (למשל "להזמנה 2", "להזמנה 1-") הן קומות נפרדות - צרי פריט לכל קומה עם הכמות שלה, בלי עמודת הסה"כ.'
+      : '';
+    const parsed = await parseOrderMessage(
+      `זהו תוכן גיליון ההזמנות המשותף של ${company.name}${sheetTitle ? ` ("${sheetTitle}")` : ''}. הטבלה כולה היא ההזמנה המלאה (לא תוספת).${floorsHint}\n\n${tableText}`,
+    );
+    if (!parsed.items.length) {
+      log.warn(`עדכון הגיליון של ${company.name} לא הניב פריטים - לא נוצרה הזמנה`);
+      return;
+    }
+    const deliveryDate = parsed.delivery_date ||
+      new Date(Date.now() + 24 * 3600 * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' });
+    const res = await this.createChannelOrder(company, {
+      deliveryDate,
+      items: parsed.items,
+      customerNote: parsed.customer_note,
+      sourceChannel: 'sheet',
+      sourceFormat: 'gsheet',
+      rawMessage: `גיליון משותף: ${sheetTitle || company.name}`,
+      replaceExisting: true,
+    });
+    bus.naama(`הזמנת השיטס של ${company.name} ${res.created ? 'נקלטה' : 'עודכנה'} · ${res.order.id}`);
+  }
+
+  // An email order (body text / Excel / PDF attachments). candidates: the CRM
+  // companies whose contacts include the sender address - when more than one,
+  // the content must identify the office, otherwise we ask the rep on
+  // WhatsApp and hold the email (never guess).
+  async handleEmailOrder(candidates, payload) {
+    this.reload();
+    const { from, subject, text, attachments } = payload;
+
+    // 1) collect parsable content
+    const excel = attachments.find((a) => /sheet|excel/i.test(a.contentType) || /\.xlsx?$/i.test(a.filename));
+    const pdf = attachments.find((a) => /pdf/i.test(a.contentType) || /\.pdf$/i.test(a.filename));
+    let doc = null;
+    try {
+      if (excel) {
+        const { excelBufferToText } = require('../parsers/registry');
+        doc = await parseTextOrders(excelBufferToText(excel.content), {
+          hint: `קובץ אקסל "${excel.filename}" ממייל של לקוח (נושא: ${subject})`,
+        });
+      } else if (pdf) {
+        doc = await parseOrderDocument(pdf.content, { hint: `קובץ מצורף למייל (נושא: ${subject})` });
+      } else if (text) {
+        doc = await parseTextOrders(text, { hint: `גוף מייל הזמנה (נושא: ${subject})` });
+      }
+    } catch (err) {
+      log.error(`פרסור מייל מ-${from} נכשל: ${err.message}`);
+    }
+    if (!doc || !doc.orders.length || !doc.orders.some((o) => o.items.length)) {
+      bus.naama(`מייל מ-${from} לא הניב הזמנה קריאה — הועבר לבדיקה ידנית`);
+      log.warn(`מייל מ-${from} ("${subject}") ללא פריטים - manual review`);
+      return;
+    }
+
+    // 2) resolve the office
+    let company = candidates.length === 1 ? candidates[0] : null;
+    if (!company) {
+      const hay = `${subject}\n${text}\n${doc.customer_name_in_doc || ''}\n${attachments.map((a) => a.filename).join('\n')}`;
+      const hits = candidates.filter((c) => {
+        const clean = (s) => String(s || '').toLowerCase().replace(/[׳'"״]/g, '');
+        const h = clean(hay);
+        return [c.name, ...(c.aliases || [])].some((n) => n && h.includes(clean(n)));
+      });
+      if (hits.length === 1) company = hits[0];
+    }
+    if (!company) {
+      this.pendingEmail = { doc, payload, candidates, at: Date.now() };
+      const names = candidates.map((c) => c.name).join(' / ');
+      bus.naama(`מייל הזמנה מ-${from} משויך לכמה לקוחות — שואלת את הנציג בוואטסאפ`);
+      await sendAndConfirm(
+        this.client,
+        config.sourceContactId,
+        `📧 התקבל מייל הזמנה מ-${from}${subject ? ` ("${subject}")` : ''}, אבל הכתובת משויכת לכמה לקוחות: ${names}.\nלאיזה לקוח שייכת ההזמנה?`,
+      );
+      return;
+    }
+    await this.createOrdersFromDoc(company, doc, `מייל מ-${from}: ${subject}`);
+  }
+
+  // Materialize docParser output (1..N dated lists, e.g. a weekly email) into
+  // orders. Undated lists default to tomorrow.
+  async createOrdersFromDoc(company, doc, rawMessage) {
+    const tomorrow = () =>
+      new Date(Date.now() + 24 * 3600 * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' });
+    for (const entry of doc.orders) {
+      if (!entry.items.length) continue;
+      const res = await this.createChannelOrder(company, {
+        deliveryDate: entry.delivery_date || tomorrow(),
+        items: entry.items,
+        sourceChannel: 'email',
+        sourceFormat: 'freetext',
+        rawMessage,
+        replaceExisting: true,
+      });
+      bus.naama(`הזמנת מייל של ${company.name} ל-${res.order.deliveryDate} ${res.created ? 'נקלטה' : 'עודכנה'} · ${res.order.id}`);
+    }
   }
 
   // ---------- Step 5: PDF to the picking group ----------

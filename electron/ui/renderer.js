@@ -77,7 +77,7 @@ const WORKERS = [
 function go(id) {
   document.querySelectorAll('.screen').forEach((s) => s.classList.remove('visible'));
   document.getElementById(id).classList.add('visible');
-  const order = ['s1', 's2', 's3', 's4', 's5w'];
+  const order = ['s1', 's2', 's3', 's3b', 's4', 's5w'];
   const idx = order.indexOf(id);
   document.querySelectorAll('.stepbar .step').forEach((b) => {
     const bIdx = order.indexOf(b.dataset.s);
@@ -109,11 +109,41 @@ async function saveSheetAndNext() {
   btn.disabled = false;
   if (res.ok) {
     if (res.companies) err.style.color = '#1E6B34';
-    err.textContent = res.companies ? `חוברו ${res.companies.length} לקוחות: ${res.companies.join(', ')}` : '';
-    setTimeout(() => go('s4'), res.companies ? 900 : 0);
+    err.textContent = res.companies ? `חוברו ${res.companies.length} לקוחות: ${res.companies.slice(0, 6).join(', ')}${res.companies.length > 6 ? '…' : ''}` : '';
+    // prefill the email step with an address from the CRM
+    api.crmEmails().then((emails) => {
+      const input = document.getElementById('email-user');
+      if (emails.length && !input.value) input.value = emails[0];
+    }).catch(() => {});
+    setTimeout(() => go('s3b'), res.companies ? 900 : 0);
   } else {
     err.style.color = '#C63B2F';
     err.textContent = res.error;
+  }
+}
+
+async function saveEmailAndNext() {
+  const btn = document.getElementById('email-next');
+  const err = document.getElementById('email-err');
+  const user = document.getElementById('email-user').value.trim();
+  const password = document.getElementById('email-pass').value.trim();
+  err.style.color = '#C63B2F';
+  if (!user || !password) {
+    err.textContent = 'נדרשות כתובת מייל וסיסמת אפליקציה (או "דלג בינתיים")';
+    return;
+  }
+  btn.disabled = true;
+  err.textContent = 'בודק את החיבור…';
+  err.style.color = '#6b7361';
+  const res = await api.saveEmail({ user, password });
+  btn.disabled = false;
+  if (res.ok) {
+    err.style.color = '#1E6B34';
+    err.textContent = 'תיבת המייל חוברה ✓';
+    setTimeout(() => go('s4'), 900);
+  } else {
+    err.style.color = '#C63B2F';
+    err.textContent = res.error || 'החיבור נכשל';
   }
 }
 
@@ -205,8 +235,23 @@ function applyConn(conn) {
     'portal',
   ));
 
+  const email = conn.email || { configured: false };
+  const emailDown = email.configured && email.ok === false;
+  const emailChip = chip(
+    !email.configured ? 'מייל: לא חובר' : emailDown ? 'מייל: אין גישה' : 'מייל הזמנות',
+    !email.configured ? '' : emailDown ? 'down' : 'ok',
+    'email',
+  );
+  if (!email.configured) {
+    // an unconfigured inbox is a click away from the setup screen
+    emailChip.disabled = false;
+    emailChip.style.pointerEvents = 'auto';
+    emailChip.onclick = () => go('s3b');
+  }
+  wrap.appendChild(emailChip);
+
   // degraded page when a configured connection is down
-  const degraded = waDown || crmDown || portalDown;
+  const degraded = waDown || crmDown || portalDown || emailDown;
   document.getElementById('dash').classList.toggle('degraded', inDashboard && degraded);
 
   // live-refresh the repair dialog; auto-close when the connection recovers
@@ -214,7 +259,8 @@ function applyConn(conn) {
     const fixed =
       (fixKind === 'whatsapp' && wa === 'connected') ||
       (fixKind === 'crm' && crm.configured && crm.ok) ||
-      (fixKind === 'portal' && portal.configured && portal.ok);
+      (fixKind === 'portal' && portal.configured && portal.ok) ||
+      (fixKind === 'email' && email.configured && email.ok);
     if (fixed) {
       document.getElementById('fix-status').textContent = 'החיבור חזר לפעול ✓';
       document.getElementById('fix-error').textContent = '';
@@ -332,6 +378,26 @@ function renderFix() {
       api.retryPortal();
     }, true));
     actionsEl.appendChild(fixAction('פתיחה בדפדפן', () => api.openPortal(), false));
+  }
+
+  if (fixKind === 'email') {
+    const email = lastConn.email || {};
+    titleEl.textContent = 'תיקון חיבור המייל';
+    statusEl.textContent = !email.configured ? 'לא חוברה תיבת מייל' : email.ok === false ? 'אין גישה לתיבה' : 'תקין';
+    errorEl.textContent = email.error || '';
+    addTips([
+      'ודאו שסיסמת האפליקציה (App Password) עדיין בתוקף — אפשר לחדש ב-myaccount.google.com ← אבטחה.',
+      'אם שיניתם סיסמה לחשבון Google — סיסמאות האפליקציה מתבטלות וצריך ליצור חדשה.',
+      'ודאו שיש חיבור אינטרנט תקין.',
+    ]);
+    actionsEl.appendChild(fixAction('בדיקה חוזרת', async () => {
+      statusEl.textContent = 'בודק את תיבת המייל…';
+      const res = await api.retryEmail();
+      if (!res.ok) {
+        statusEl.textContent = 'עדיין אין גישה';
+        errorEl.textContent = res.error || '';
+      }
+    }, true));
   }
 }
 

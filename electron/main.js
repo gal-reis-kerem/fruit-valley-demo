@@ -41,6 +41,7 @@ function connSnapshot() {
     whatsapp: { state: engine.state.state, error: engine.state.error },
     crm: sheets.getStatus(),
     portal: { ...portalStatus },
+    email: engine.getEmailStatus(),
   };
 }
 
@@ -131,6 +132,36 @@ ipcMain.handle('retry-crm', async () => {
   }
 });
 ipcMain.handle('retry-portal', () => checkPortal());
+ipcMain.handle('save-email', async (e, creds) => {
+  try {
+    const res = await engine.saveEmailSettings(creds || {});
+    return res;
+  } catch (err) {
+    return { ok: false, error: err.message };
+  } finally {
+    forward('conn', connSnapshot());
+  }
+});
+ipcMain.handle('retry-email', async () => {
+  try {
+    const email = require('../src/channels/email');
+    const res = await email.testConnection();
+    if (res.ok) email.startPolling(() => (engine.state.state === 'connected' && engine.state.flow ? engine.state.flow : null));
+    return res;
+  } catch (err) {
+    return { ok: false, error: err.message };
+  } finally {
+    forward('conn', connSnapshot());
+  }
+});
+ipcMain.handle('crm-emails', () => {
+  // distinct contact emails from the CRM - prefill for the email step
+  const emails = new Set();
+  for (const c of config.companies) {
+    for (const ct of (c.crm && c.crm.contacts) || []) if (ct.email) emails.add(ct.email);
+  }
+  return [...emails];
+});
 ipcMain.handle('open-sheet', () => {
   shell.openExternal(`https://docs.google.com/spreadsheets/d/${config.crmSpreadsheetId}`);
 });

@@ -68,6 +68,24 @@ function contactCompanies(phoneId) {
   return config.companies.filter((c) => (c.contacts || []).includes(phone));
 }
 
+// email -> companies whose CRM contacts include this address (lowercased).
+function contactCompaniesByEmail(address) {
+  const email = String(address || '').trim().toLowerCase();
+  if (!email) return [];
+  return config.companies.filter((c) =>
+    ((c.crm && c.crm.contacts) || []).some((ct) => ct.email === email));
+}
+
+// The raw CRM office records currently loaded (empty array before first sync).
+function allOffices() {
+  return config.companies.filter((c) => c.crm).map((c) => c.crm);
+}
+
+// office key -> the engine company entry (with initials/aliases/crm).
+function companyByOfficeKey(officeKey) {
+  return config.companies.find((c) => c.crm && c.crm.key === officeKey) || null;
+}
+
 async function refresh() {
   try {
     const snapshot = await source.sync();
@@ -106,6 +124,9 @@ module.exports = {
   startPolling,
   stopPolling,
   contactCompanies,
+  contactCompaniesByEmail,
+  allOffices,
+  companyByOfficeKey,
   getStatus,
   readinessReport: () => source.readinessReport(),
   getSyncState: () => source.getSyncState(),

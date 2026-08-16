@@ -38,11 +38,11 @@
   }
   .wizard-card h1 { font-size: 26px; color: var(--green-dark); margin-bottom: 8px; }
   .wizard-card p.sub { color: #6b7361; font-size: 15px; margin-bottom: 26px; line-height: 1.6; }
-  input[type=text] {
+  input[type=text], input[type=password] {
     width: 100%; padding: 13px 16px; font-size: 17px; border: 2px solid #E2DCC8; border-radius: 10px;
     text-align: center; direction: ltr; margin-bottom: 18px; background: #FFFDF6; user-select: text;
   }
-  input[type=text]:focus { outline: none; border-color: var(--yellow); }
+  input[type=text]:focus, input[type=password]:focus { outline: none; border-color: var(--yellow); }
   .err { color: var(--red); font-size: 13.5px; margin-bottom: 14px; min-height: 18px; }
 
   #s1 { background: linear-gradient(180deg, var(--cream) 60%, var(--yellow-soft) 130%); }
@@ -265,6 +265,8 @@
   <svg class="sep-ic" viewBox="0 0 24 24"><path d="M14.5 5.5 8 12l6.5 6.5" fill="none" stroke="#D8D2C0" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
   <span class="step" data-s="s3">חיבור לקוחות</span>
   <svg class="sep-ic" viewBox="0 0 24 24"><path d="M14.5 5.5 8 12l6.5 6.5" fill="none" stroke="#D8D2C0" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  <span class="step" data-s="s3b">חיבור מייל</span>
+  <svg class="sep-ic" viewBox="0 0 24 24"><path d="M14.5 5.5 8 12l6.5 6.5" fill="none" stroke="#D8D2C0" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
   <span class="step" data-s="s4">פורטל הזמנות</span>
   <svg class="sep-ic" viewBox="0 0 24 24"><path d="M14.5 5.5 8 12l6.5 6.5" fill="none" stroke="#D8D2C0" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
   <span class="step" data-s="s5w">סיום</span>
@@ -303,6 +305,22 @@
       <div class="err" id="sheet-err"></div>
       <div class="sync-note">מהרגע שהחיבור פעיל — כל עדכון בטבלה מתעדכן אוטומטית גם אצל העובדים הדיגיטליים</div>
       <button class="btn" id="sheet-next" onclick="saveSheetAndNext()">הבא</button>
+    </div>
+  </div>
+</section>
+
+<section class="screen" id="s3b">
+  <div class="center">
+    <div class="wizard-card">
+      <svg class="sheet-icon" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2.5" fill="#1E6B34"/><path d="M3.5 6.5 12 13l8.5-6.5" fill="none" stroke="#FBE28A" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <h1>חיבור תיבת המייל</h1>
+      <p class="sub">חלק מהלקוחות שולחים הזמנות במייל — חברו את התיבה שאליה הן מגיעות והעובדים יקראו אותן לבד. הקריאה בלבד: אף מייל לא נמחק ולא נשלח</p>
+      <input type="text" id="email-user" placeholder="כתובת המייל (למשל orders@business.co.il)" dir="ltr" style="text-align:left">
+      <input type="password" id="email-pass" placeholder="סיסמת אפליקציה (App Password)" dir="ltr" style="text-align:left">
+      <div class="sync-note">בחשבון Google: myaccount.google.com ← אבטחה ← אימות דו-שלבי ← סיסמאות אפליקציה, וצרו סיסמה ייעודית לתוכנה זו (לא סיסמת החשבון הרגילה)</div>
+      <div class="err" id="email-err"></div>
+      <button class="btn" id="email-next" onclick="saveEmailAndNext()">בדוק וחבר</button>
+      <button class="btn yellow" onclick="go('s4')" style="margin-top:8px">דלג בינתיים</button>
     </div>
   </div>
 </section>

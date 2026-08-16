@@ -1,31 +1,50 @@
-// Inbound channel adapters. WhatsApp is fully live (src/engine.js). Email and
-// shared-Sheet polling are declared here with HONEST readiness gating - an
-// integration is never presented as active while its prerequisite is missing.
+// Inbound channel adapters with HONEST readiness gating - an integration is
+// never presented as active while its prerequisite is missing.
+//   whatsapp - always live (src/engine.js)
+//   email    - live once the inbox is configured (src/channels/email.js)
+//   sheet    - live once the customer's sheet was located in the Drive
+//              folder (src/orders/sheetOrders.js discovery)
+//   db       - live once the customer's base order was loaded from Drive
+//              (src/orders/fixedSync.js) or manually (npm run base:set)
+const fs = require('fs');
+const path = require('path');
+const { config } = require('../config');
+
+function sheetMapped(office) {
+  try {
+    const st = JSON.parse(fs.readFileSync(path.join(config.dataDir, 'sheet-orders-state.json'), 'utf8'));
+    return Boolean(office && st.customers && st.customers[office.key]);
+  } catch {
+    return false;
+  }
+}
+
 const registry = {
   whatsapp: {
-    active: true,
     describe: () => ({ status: 'active' }),
   },
   email: {
-    active: false,
-    describe: (office) => ({
-      status: 'blocked',
-      reason: `נדרשת הרשאת גישה לתיבת המייל עבור ${office ? office.displayName : 'הלקוח'}`,
-    }),
+    describe: (office) => {
+      let ok = false;
+      try { ok = require('./email').configured(); } catch { /* not configured */ }
+      return ok
+        ? { status: 'active' }
+        : { status: 'blocked', reason: `נדרשת הגדרת חיבור המייל עבור ${office ? office.displayName : 'הלקוח'}` };
+    },
   },
   sheet: {
-    active: false,
-    describe: (office) => ({
-      status: office && office.examplesLink ? 'missing_prerequisite' : 'blocked',
-      reason: 'נדרש לינק לגיליון המשותף של הלקוח (חסר ב-CRM)',
-    }),
+    describe: (office) => (sheetMapped(office)
+      ? { status: 'active' }
+      : { status: 'blocked', reason: 'הגיליון של הלקוח טרם אותר בתיקיית השיטס' }),
   },
   db: {
-    active: false,
-    describe: (office) => ({
-      status: 'missing_prerequisite',
-      reason: `נדרשת טעינת הזמנת הבסיס של ${office ? office.displayName : 'הלקוח'} (npm run base:set)`,
-    }),
+    describe: (office) => {
+      let has = false;
+      try { has = office && Boolean(require('../orders/baseOrders').activeBase(office.key)); } catch { /* empty */ }
+      return has
+        ? { status: 'active' }
+        : { status: 'missing_prerequisite', reason: `נדרשת טעינת הזמנת הבסיס של ${office ? office.displayName : 'הלקוח'} (npm run fixed:sync)` };
+    },
   },
 };
 

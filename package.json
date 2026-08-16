@@ -12,7 +12,10 @@
     "test:parse": "node scripts/test-parse.js",
     "test": "node --test test/*.test.js",
     "crm:sync": "node scripts/crm-sync.js",
-    "base:set": "node scripts/set-base-order.js"
+    "base:set": "node scripts/set-base-order.js",
+    "fixed:sync": "node scripts/fixed-sync.js",
+    "fixed:issue": "node scripts/fixed-sync.js --issue",
+    "sheets:poll": "node scripts/sheets-poll.js"
   },
   "engines": {
     "node": ">=18"
@@ -47,6 +50,8 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.112.3",
     "dotenv": "^17.4.2",
+    "imapflow": "^1.7.1",
+    "mailparser": "^3.9.15",
     "pdf-parse": "^2.4.5",
     "puppeteer": "^25.3.0",
     "qrcode": "^1.5.4",

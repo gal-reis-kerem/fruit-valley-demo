@@ -18,7 +18,10 @@ const MAIN_SHEET = process.env.CRM_MAIN_SHEET || 'פירות העמק לקוחו
 const INTERNAL_SHEET = process.env.CRM_INTERNAL_SHEET || 'פירות העמק פנימי';
 const SNAPSHOT_PATH = path.join(config.dataDir, 'crm-snapshot.json');
 
-// Initial-migration validation counts (warn-only, never a hard rule)
+// Initial-migration validation counts (warn-only, never a hard rule).
+// They describe the ORIGINAL spec spreadsheet - when the app points at a
+// different sheet (e.g. the test CRM) the comparison is skipped.
+const SPEC_SHEET_ID = '1JRWKQblbuGn_4gLVFMl5rhgKCj5SIVI4vK9_kL2A8ag';
 const EXPECTED = {
   records: 47,
   orderType: { fixed: 9, variable: 38 },
@@ -106,17 +109,16 @@ function mapRow(row, col) {
   const exampleStatus = EXAMPLE[clean(row[col('מכיל דוגמא?')]).toUpperCase()] || 'unknown';
   const examplesLink = clean(row[col('לינק לתיקיית דוגמאות')]) || null;
 
-  // readiness: never present an integration as active when a prerequisite is
-  // missing. WhatsApp free-text is the only fully-live path today.
+  // Static readiness (recomputed against LIVE capabilities - configured
+  // email, discovered sheets, loaded bases - by applyLiveReadiness below).
+  // PDF parsing is generic (Claude document reading), so PDF customers are
+  // no longer blocked on example files.
   const reasons = [];
-  if (channel === 'email') reasons.push('נדרשת הרשאת גישה למייל');
-  if (channel === 'sheet') reasons.push('נדרש לינק לגיליון המשותף');
+  if (channel === 'email') reasons.push('נדרשת הגדרת חיבור המייל');
+  if (channel === 'sheet') reasons.push('נדרש איתור הגיליון המשותף');
   if (channel === 'db') reasons.push('נדרשת טעינת הזמנת בסיס למאגר');
-  if (format === 'pdf' && exampleStatus !== 'has') reasons.push('פרסור PDF ממתין לדוגמה');
-  if (exampleStatus === 'missing') reasons.push('דוגמה חסרה בתיקיית הדוגמאות');
-  if (notesFlags.missingPrerequisite) reasons.push(`הערת CRM: ${notesFlags.raw.slice(0, 60)}`);
   const status =
-    channel === 'whatsapp' && (format === 'freetext' || format === 'pdf')
+    channel === 'whatsapp'
       ? (reasons.length ? 'partial' : 'active')
       : reasons.length
         ? 'missing_prerequisite'
@@ -193,6 +195,34 @@ const syncState = {
   validation: [],
 };
 
+// Recompute an office's readiness against what the system can ACTUALLY do
+// right now: is the email inbox configured, was the customer's sheet located
+// in the Drive folder, is a base order loaded. Called at sync/report time so
+// capabilities gained later (onboarding, drive sync) flip statuses honestly.
+function applyLiveReadiness(o) {
+  const reasons = [];
+  if (o.channel === 'email') {
+    let ok = false;
+    try { ok = require('../channels/email').configured(); } catch { /* not wired in tests */ }
+    if (!ok) reasons.push('נדרשת הגדרת חיבור המייל (מסך החיבורים / EMAIL_USER)');
+  }
+  if (o.channel === 'sheet') {
+    let mapped = false;
+    try {
+      const st = JSON.parse(fs.readFileSync(path.join(config.dataDir, 'sheet-orders-state.json'), 'utf8'));
+      mapped = Boolean(st.customers && st.customers[o.key]);
+    } catch { /* no poll yet */ }
+    if (!mapped) reasons.push('ממתין לזיהוי הגיליון של הלקוח בתיקיית השיטס');
+  }
+  if (o.channel === 'db') {
+    let has = false;
+    try { has = Boolean(require('../orders/baseOrders').activeBase(o.key)); } catch { /* empty store */ }
+    if (!has) reasons.push('נדרשת טעינת הזמנת בסיס (npm run fixed:sync)');
+  }
+  const status = !reasons.length ? 'active' : o.channel === 'whatsapp' ? 'partial' : 'missing_prerequisite';
+  return { ...o, readiness: { status, reasons } };
+}
+
 function validateCounts(offices) {
   const issues = [];
   const count = (fn) => offices.filter(fn).length;
@@ -214,6 +244,9 @@ function validateCounts(offices) {
     exampleMissing: count((o) => o.exampleStatus === 'missing'),
     exampleNotNeeded: count((o) => o.exampleStatus === 'not_needed'),
   };
+  if (config.crmSpreadsheetId !== SPEC_SHEET_ID) {
+    return { actual, issues: [] }; // counts belong to the original sheet only
+  }
   const expect = (label, got, want) => {
     if (got !== want) issues.push(`${label}: ${got} (צפוי ${want})`);
   };
@@ -300,7 +333,8 @@ async function fetchInternalContacts() {
 
 async function sync() {
   try {
-    const [offices, internalContacts] = await Promise.all([fetchOffices(), fetchInternalContacts()]);
+    const [rawOffices, internalContacts] = await Promise.all([fetchOffices(), fetchInternalContacts()]);
+    const offices = rawOffices.map(applyLiveReadiness);
     const { actual, issues } = validateCounts(offices);
     const snapshot = {
       syncedAt: new Date().toISOString(),
@@ -340,8 +374,9 @@ function loadSnapshot() {
 }
 
 // Readiness / gaps report - never invent URLs, permissions or structures.
+// Readiness is recomputed live so newly-gained capabilities show through.
 function readinessReport(snapshot) {
-  const offices = (snapshot || loadSnapshot() || { offices: [] }).offices;
+  const offices = ((snapshot || loadSnapshot() || { offices: [] }).offices).map(applyLiveReadiness);
   return {
     generatedAt: new Date().toISOString(),
     lastSync: syncState.lastSync,

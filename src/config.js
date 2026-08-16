@@ -32,6 +32,17 @@ const config = {
   // CRM v2: the Fruit Valley customers spreadsheet (payer + office model).
   // Central place for the id - never scatter it through the code.
   crmSpreadsheetId: process.env.CRM_SPREADSHEET_ID || '1JRWKQblbuGn_4gLVFMl5rhgKCj5SIVI4vK9_kL2A8ag',
+  // Google Drive folders (public link sharing, read-only):
+  // fixed base orders per customer, and per-customer order sheets.
+  fixedOrdersFolderId: process.env.FIXED_ORDERS_FOLDER_ID || '1NBYb8PQIb2rG3U0kYO2u_kULc9F6ZnCk',
+  sheetsOrdersFolderId: process.env.SHEETS_ORDERS_FOLDER_ID || '1HPg7IsoKmmaOLi_2sjopzEiKfpxePWKn',
+  // Fixed orders are auto-issued on their scheduled delivery day at this hour.
+  fixedIssueHour: process.env.FIXED_ISSUE_HOUR || '06:30',
+  // Email channel (IMAP, read-only). User + app password land in settings.json
+  // via the onboarding screen, or here via env.
+  emailHost: process.env.EMAIL_HOST || 'imap.gmail.com',
+  emailUser: process.env.EMAIL_USER || '',
+  emailPassword: process.env.EMAIL_APP_PASSWORD || '',
   // Triple team contact for worker escalations ("מדבר עם החבר'ה של טריפל")
   tripleContact: normalizePhone(process.env.TRIPLE_CONTACT_NUMBER || '0548383333'),
   tripleContactId: normalizePhone(process.env.TRIPLE_CONTACT_NUMBER || '0548383333') + '@c.us',

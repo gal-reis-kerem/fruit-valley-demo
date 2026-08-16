@@ -1,26 +1,25 @@
 // Format parsers. Channel and format are independent dimensions: a PDF may
 // arrive over WhatsApp, an Excel over email, a shared Google Sheet is read
-// from its link. Each parser turns its input into TEXT which the canonical
-// free-text parser (Claude) normalizes - one brain, many formats.
+// from its link. Each parser turns its input into TEXT (or structured items)
+// which the canonical parser (Claude) normalizes - one brain, many formats.
 //
-// PDF strategies: recognized layouts (Restigo, Zest) get dedicated
-// strategies once their example files are analyzed; until then a generic
-// text-extraction strategy applies and low-confidence results are flagged.
+// PDFs are handled GENERICALLY by Claude's native PDF understanding
+// (src/ai/docParser.js): the same path reads Restigo exports, Zest exports,
+// delivery notes, floor-matrix tables and scanned pages - no per-customer
+// strategy code, exactly like a human reading the page.
 const log = require('../logger');
 
-const pdfStrategies = {
-  // Placeholders on purpose: never pretend a layout-specific parser exists
-  // before its example was analyzed. `generic` extracts raw text.
-  restigo: { status: 'missing_prerequisite', reason: 'ממתין לניתוח קובצי הדוגמה של רסטיגו' },
-  zest: { status: 'missing_prerequisite', reason: 'ממתין לניתוח קובצי הדוגמה של Zest' },
-};
-
-// PDF -> plain text (generic strategy). Works for text-based PDFs; scanned
-// images yield empty text and are routed to manual review by the caller.
+// PDF -> plain text (cheap textual extraction). Kept for tests/diagnostics;
+// the live flow prefers docParser which also reads scans and matrices.
 async function pdfToText(buffer) {
-  const pdfParse = require('pdf-parse');
-  const parsed = await pdfParse(buffer);
-  return (parsed.text || '').trim();
+  const { PDFParse } = require('pdf-parse');
+  const parser = new PDFParse({ data: new Uint8Array(buffer) });
+  try {
+    const res = await parser.getText();
+    return (res.text || '').trim();
+  } finally {
+    await parser.destroy().catch(() => {});
+  }
 }
 
 // Excel -> tab-separated text lines (all sheets), preserving cell text.
@@ -37,6 +36,7 @@ function excelToText(buffer) {
   }
   return lines.join('\n');
 }
+const excelBufferToText = excelToText;
 
 // Shared Google Sheet (by link) -> CSV text. Only called when the office has
 // a configured link; readiness gating prevents calls without one.
@@ -48,22 +48,25 @@ async function sharedSheetToText(sheetUrl) {
   return res.text();
 }
 
-// media (from WhatsApp) -> { text, provenance } or { manualReview: reason }
+// media (from WhatsApp) -> one of:
+//   { doc, provenance }   structured docParser output (PDFs)
+//   { text, provenance }  raw text for the free-text parser (Excel)
+//   { manualReview: reason } / null (not a parseable document)
 async function mediaToText(media, office) {
   const mimetype = media.mimetype || '';
   const buffer = Buffer.from(media.data, 'base64');
   try {
     if (mimetype.includes('pdf')) {
-      const strategyName = office && office.notesFlags && office.notesFlags.pdfSource;
-      const strategy = strategyName && pdfStrategies[strategyName];
-      const provenance = strategy && strategy.status !== 'ready'
-        ? `pdf/generic (אסטרטגיית ${strategyName}: ${strategy.reason})`
-        : 'pdf/generic';
-      const text = await pdfToText(buffer);
-      if (!text || text.length < 10) {
-        return { manualReview: 'לא חולץ טקסט מה-PDF (ייתכן קובץ סרוק) - נדרשת בדיקה ידנית' };
+      const { parseOrderDocument } = require('../ai/docParser');
+      const hintParts = [];
+      if (office) hintParts.push(`הקובץ הגיע בוואטסאפ מהלקוח ${office.displayName}`);
+      const flags = office && office.notesFlags;
+      if (flags && flags.pdfSource) hintParts.push(`פורמט צפוי: ייצוא ${flags.pdfSource}`);
+      const doc = await parseOrderDocument(buffer, { hint: hintParts.join('. ') });
+      if (!doc.orders.length || !doc.orders.some((o) => o.items.length)) {
+        return { manualReview: 'לא זוהו פריטי הזמנה ב-PDF - נדרשת בדיקה ידנית' };
       }
-      return { text, provenance };
+      return { doc, provenance: 'pdf/claude' };
     }
     if (mimetype.includes('sheet') || mimetype.includes('excel') || /\.(xlsx?|csv)$/i.test(media.filename || '')) {
       const text = excelToText(buffer);
@@ -77,4 +80,4 @@ async function mediaToText(media, office) {
   return null; // not a parseable document (e.g. an image)
 }
 
-module.exports = { mediaToText, pdfToText, excelToText, sharedSheetToText, pdfStrategies };
+module.exports = { mediaToText, pdfToText, excelToText, excelBufferToText, sharedSheetToText };

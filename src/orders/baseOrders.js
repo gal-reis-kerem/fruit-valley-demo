@@ -57,16 +57,22 @@ function baseFor(officeKey, deliveryDate) {
 }
 
 // Add a new base version (never overwrites history - full audit trail).
-function setBase(officeKey, { items = null, perDay = null, note = '' }) {
+// fingerprint (optional) lets sync jobs detect "nothing changed" cheaply.
+function setBase(officeKey, { items = null, perDay = null, note = '', fingerprint = null }) {
   if (!items && !perDay) throw new Error('נדרשים items או perDay');
   const db = load();
   const entry = db[officeKey] || { versions: [] };
   const id = `v${entry.versions.length + 1}`;
-  entry.versions.push({ id, createdAt: new Date().toISOString(), note, items, perDay });
+  entry.versions.push({ id, createdAt: new Date().toISOString(), note, items, perDay, fingerprint });
   entry.activeVersion = id;
   db[officeKey] = entry;
   save(db);
   return id;
+}
+
+// The active base version object (or null) - includes fingerprint/perDay.
+function activeBase(officeKey) {
+  return getVersion(officeKey);
 }
 
 function listBases() {
@@ -78,4 +84,4 @@ function listBases() {
   }));
 }
 
-module.exports = { baseFor, setBase, getVersion, listBases };
+module.exports = { baseFor, setBase, getVersion, listBases, activeBase };

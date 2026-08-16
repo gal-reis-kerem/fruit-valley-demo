@@ -369,6 +369,45 @@ async function start({ cli = false, webPanel = true } = {}) {
   // CRM v2 is the central source of truth - always sync and keep polling.
   sheets.startPolling();
 
+  // Channel workers. Each is independent and self-healing: a failure logs a
+  // warning and the next interval retries; nothing here can kill the engine.
+  const getFlow = () => (state.state === 'connected' && state.flow ? state.flow : null);
+
+  // Fixed base orders from Drive (per-customer schedule). First run shortly
+  // after the CRM settles, then refreshed every 30 minutes (cached by content
+  // hash - unchanged files are never re-parsed).
+  const fixedSync = require('./orders/fixedSync');
+  const runFixedSync = async () => {
+    try {
+      const r = await fixedSync.syncFixedOrders();
+      const changed = r.loaded.filter((l) => l.changed);
+      log.info(`סנכרון הזמנות קבועות: ${r.loaded.length} לקוחות במאגר (${changed.length} עודכנו, ${r.filesParsed} קבצים פורסרו)`);
+      for (const g of r.gaps) log.warn(`הזמנות קבועות: ${g}`);
+      if (changed.length) bus.yuval(`עדכנתי הזמנות בסיס מהדרייב: ${changed.map((l) => l.office).join(', ')}`);
+    } catch (err) {
+      log.warn(`סנכרון הזמנות קבועות נכשל: ${err.message}`);
+    }
+  };
+  setTimeout(runFixedSync, 20000);
+  setInterval(runFixedSync, 30 * 60 * 1000);
+
+  // Per-schedule issuance of fixed orders (only on days that have a base).
+  const scheduler = require('./orders/scheduler');
+  setInterval(() => scheduler.tick(getFlow).catch((err) => log.warn(`לוז קבועות: ${err.message}`)), 60 * 1000);
+
+  // Shared-sheet orders: poll the customers' sheets folder.
+  const sheetOrders = require('./orders/sheetOrders');
+  const runSheetPoll = () => sheetOrders.pollOnce(getFlow).catch((err) => log.warn(`ערוץ שיטס: ${err.message}`));
+  setTimeout(runSheetPoll, 30000);
+  setInterval(runSheetPoll, 5 * 60 * 1000);
+
+  // Email inbox (if configured here or later via the connections screen).
+  const email = require('./channels/email');
+  setTimeout(() => {
+    if (email.configured()) email.startPolling(getFlow);
+    else log.info('ערוץ המייל לא מוגדר עדיין (מסך החיבורים באפליקציה או EMAIL_USER ב-.env)');
+  }, 25000);
+
   if (webPanel) {
     startWebServer({
       getState: () => ({ state: state.state, running: state.running }),
@@ -449,4 +488,19 @@ function getCustomers(date) {
   return store.customersOverview(store.loadDB(), config.companies, date);
 }
 
-module.exports = { start, startWhatsApp, stopWhatsApp, endDay, resumeDay, state, bus, getStats, getStatsFull, getComplaints, getRules, chatWithWorker, getCustomers, config };
+// Email channel controls for the connections screen
+function getEmailStatus() {
+  return require('./channels/email').getStatus();
+}
+async function saveEmailSettings({ user, password, host }) {
+  writeSettings({ emailUser: user || '', emailPassword: password || '', emailHost: host || '' });
+  const email = require('./channels/email');
+  const check = await email.testConnection();
+  if (check.ok) {
+    email.startPolling(() => (state.state === 'connected' && state.flow ? state.flow : null));
+    bus.naama(`חיבור המייל הוגדר (${user}) - מתחילה לעקוב אחרי הזמנות במייל`);
+  }
+  return check;
+}
+
+module.exports = { start, startWhatsApp, stopWhatsApp, endDay, resumeDay, state, bus, getStats, getStatsFull, getComplaints, getRules, chatWithWorker, getCustomers, config, getEmailStatus, saveEmailSettings };
