@@ -289,6 +289,7 @@ async function installMediaHook(client, onMedia) {
         msgId: keyToString(m.id),
         chatId: m.id.remote ? (m.id.remote._serialized || String(m.id.remote)) : String(m.from || ''),
         senderId: m.author ? (m.author._serialized || String(m.author)) : null,
+        fromMe: Boolean(m.id.fromMe),
         timestamp: m.t || Math.floor(Date.now() / 1000),
         type: m.type,
         mimetype: m.mimetype || (m.type === 'image' ? 'image/jpeg' : 'application/octet-stream'),
@@ -324,8 +325,12 @@ async function installMediaHook(client, onMedia) {
     if (Msg.__tripleMediaHooked) return;
     Msg.on('add', (m) => {
       try {
-        if (!m || !m.isNewMsg || !m.id || m.id.fromMe) return;
+        if (!m || !m.isNewMsg || !m.id) return;
         if (!['image', 'document', 'video'].includes(m.type)) return;
+        // own outgoing media is forwarded ONLY for images: packing photos may
+        // be sent from the very account the bot runs on. The bot itself sends
+        // only PDFs/text, so own documents (our picking sheets) stay filtered.
+        if (m.id.fromMe && m.type !== 'image') return;
         (async () => {
           window.onTripleMedia(await buildPayload(m));
         })();

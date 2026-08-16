@@ -285,7 +285,7 @@ async function launchClient(attempt) {
           log.info(`הודעת מדיה (${msg.type || 'לא ידוע'}) - ממתין להוק הדף לקלוט אותה`);
           setTimeout(async () => {
             try {
-              const key = `media|${chatId}|${msg.timestamp}`;
+              const key = `media|${(msg.id && (msg.id._serialized || msg.id.$1)) || `${chatId}|${msg.timestamp}`}`;
               if (processedMsgs.has(key)) return; // page hook handled it
               log.warn('הוק הדף לא קלט את המדיה תוך 20 שניות - שולף אותה מהדף לפי מזהה');
               const msgId = (msg.id && (msg.id._serialized || msg.id.$1)) || null;
@@ -339,14 +339,27 @@ async function launchClient(attempt) {
     // DownloadManager and hands us plain data; a wwebjs downloadMedia call is
     // the fallback layer. Both funnel into routeMediaPayload; dedup runs on a
     // dedicated `media|` key so the text event never shadows the file.
-    const mediaKey = (chatId, timestamp) => `media|${chatId}|${timestamp}`;
+    // keyed by MESSAGE id (not chat+second) so album photos sent in the same
+    // second are each processed
+    const mediaKey = (payload) => `media|${payload.msgId || `${payload.chatId}|${payload.timestamp}`}`;
     const routeMediaPayload = async (payload, via) => {
       if (!payload || !payload.dataB64) return;
-      const key = mediaKey(payload.chatId, payload.timestamp);
+
+      const isGroupChat = payload.chatId.endsWith('@g.us');
+      const inOurGroups =
+        isGroupChat &&
+        (payload.chatId === pickingGroup.id._serialized ||
+          (photosGroup && payload.chatId === photosGroup.id._serialized));
+      // media sent from the bot's own account: only packing PHOTOS in our
+      // groups are meaningful (the operator may shoot photos from the same
+      // phone the bot is linked to). Everything else own-sent is ignored.
+      if (payload.fromMe && !(payload.type === 'image' && inOurGroups)) return;
+
+      const key = mediaKey(payload);
       if (processedMsgs.has(key)) return; // the other layer already handled it
       markProcessed(key);
       writeSettings({ lastSeenTs: Date.now() });
-      log.info(`מדיה נקלטה (${via}): ${payload.type} (${payload.filename || payload.mimetype})${payload.caption ? ` + טקסט "${payload.caption.slice(0, 40)}"` : ''}`);
+      log.info(`מדיה נקלטה (${via}): ${payload.type} (${payload.filename || payload.mimetype})${payload.fromMe ? ' [מהחשבון של הבוט]' : ''}${payload.caption ? ` + טקסט "${payload.caption.slice(0, 40)}"` : ''}`);
 
       const pseudoMsg = {
         id: { _serialized: payload.msgId },
