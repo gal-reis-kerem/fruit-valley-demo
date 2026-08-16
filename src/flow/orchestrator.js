@@ -793,12 +793,10 @@ class Orchestrator {
     log.info(`דף ליקוט ${order.id} v${order.version} נשלח לקבוצת הליקוט`);
     bus.yuval(`דף הליקוט ${order.id} נשלח לקבוצת ההדפסות`);
 
-    // The photos-group side runs in lockstep with every PDF, so no shipment
-    // falls between the chairs: first send opens the photo thread, updates
-    // announce the latest sheet version.
-    if (!order.photoRequestMsgId) {
-      await this.sendPhotoRequest(order);
-    } else {
+    // The photos group joins the flow only AFTER a picker marks the sheet as
+    // printed (reaction) - see handleReaction. Here we only keep it updated
+    // when a newer sheet version lands after the photo thread already opened.
+    if (order.photoRequestMsgId) {
       const noticeChat = this.photosGroup || this.pickingGroup;
       await sendAndConfirm(
         this.client,
@@ -812,8 +810,8 @@ class Orchestrator {
     }
   }
 
-  // FR-12: photo request, attributed to the order - sent together with the
-  // first picking sheet.
+  // FR-12: photo request, attributed to the order - sent once the picker
+  // marked the sheet as printed (reaction on the PDF).
   async sendPhotoRequest(order) {
     const requestText =
       `📸 אנא השב להודעה זו עבור ההזמנה של:\n` +
@@ -872,22 +870,29 @@ class Orchestrator {
     if (!order || !['sent_to_group', 'awaiting_photos'].includes(order.status)) return;
     if (order.reaction) return; // picking start already recorded
 
-    // The photo request already went out with the PDF — the reaction just
-    // records that the sheet was printed and picking started (FR-11).
+    // FR-11: the reaction records that the sheet was printed and picking
+    // started - and ONLY NOW the photos group is asked for documentation.
     order.reaction = { emoji: reaction.reaction, by: reaction.senderId, at: new Date().toISOString() };
     store.addHistory(order, 'picking_started', `ריאקשן ${reaction.reaction} - הדף הודפס והליקוט החל`);
     this.save();
     log.info(`הזמנה ${order.id}: זוהה ריאקשן ${reaction.reaction} - הליקוט החל`);
     bus.yuval(`מלקט סימן ${reaction.reaction} — הדף הודפס והליקוט התחיל · ${order.id}`);
+
+    if (!order.photoRequestMsgId) {
+      await this.sendPhotoRequest(order);
+    }
   }
 
   // ---------- Step 8: photos -> the order becomes "picked" ----------
   // One shipment photo is enough to mark the order picked. Attribution:
   // reply-quote first; a single open order second; otherwise we ask in the
   // group and wait for a text answer.
+  // Only orders whose photo thread is open (i.e. the sheet was printed and a
+  // photo request went out) are candidates for photo attribution - pre-print
+  // orders are not in the photos stage yet.
   openPhotoOrders() {
     return this.db.orders
-      .filter((o) => ['sent_to_group', 'awaiting_photos', 'picking', 'documented'].includes(o.status))
+      .filter((o) => ['awaiting_photos', 'documented'].includes(o.status))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
