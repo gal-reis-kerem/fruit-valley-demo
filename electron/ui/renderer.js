@@ -471,6 +471,23 @@ function pdfLinkEl(r) {
   return link;
 }
 
+// picking-evidence photos, shown once the order is picked
+function photoLinksEl(r) {
+  const wrap = document.createElement('div');
+  wrap.className = 'photo-links';
+  r.photos.forEach((p, i) => {
+    const link = document.createElement('span');
+    link.className = 'pdf-link';
+    link.textContent = r.photos.length > 1 ? `תמונת ליקוט ${i + 1}` : 'תמונת הליקוט';
+    link.onclick = (e) => {
+      e.stopPropagation();
+      api.openPath(p);
+    };
+    wrap.appendChild(link);
+  });
+  return wrap;
+}
+
 async function refreshCustomers() {
   try {
     const rows = await api.getCustomers(selectedDate());
@@ -502,7 +519,8 @@ async function refreshCustomers() {
       }
       const pdf = document.createElement('td');
       if (r.lastPdf) pdf.appendChild(pdfLinkEl(r));
-      else {
+      if (r.photos && r.photos.length) pdf.appendChild(photoLinksEl(r));
+      if (!r.lastPdf && !(r.photos && r.photos.length)) {
         pdf.textContent = '—';
         pdf.className = 'muted';
       }
@@ -538,6 +556,7 @@ async function refreshCustomers() {
             card.appendChild(kid);
           }
           if (r.lastPdf) card.appendChild(pdfLinkEl(r));
+          if (r.photos && r.photos.length) card.appendChild(photoLinksEl(r));
           col.appendChild(card);
         }
       }

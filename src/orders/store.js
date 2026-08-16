@@ -196,6 +196,9 @@ function customersOverview(db, companies, date) {
       else if (dateOrder.reaction) stage = 'picking';
       else stage = 'received';
     }
+    // picking-evidence photos (fall back to all attachments if none tagged)
+    const allPhotos = dateOrder ? (dateOrder.photos || []).map((p) => p.path) : [];
+    const evidence = allPhotos.filter((p) => p.includes('-evidence-'));
     return {
       name: c.name,
       stage,
@@ -203,6 +206,7 @@ function customersOverview(db, companies, date) {
       lastOrderId: dateOrder ? dateOrder.id : null,
       lastVersion: dateOrder ? dateOrder.version : null,
       lastPdf: dateOrder && dateOrder.pdfPath ? dateOrder.pdfPath : null,
+      photos: evidence.length ? evidence : allPhotos,
       postPrintChanges: dateOrder ? (dateOrder.postPrintChanges || []).map((ch) => ch.text) : [],
     };
   });
