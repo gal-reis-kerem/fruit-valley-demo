@@ -216,7 +216,7 @@ async function installMediaHook(client, onMedia) {
   await client.pupPage.evaluate(() => {
     const Collections = window.require('WAWebCollections');
     const Msg = Collections.Msg;
-    if (!Msg || Msg.__tripleMediaHooked) return;
+    if (!Msg) return;
 
     const keyToString = (k) =>
       k
@@ -233,12 +233,26 @@ async function installMediaHook(client, onMedia) {
       return btoa(bin);
     };
 
+    // The exact recipe whatsapp-web.js itself uses on this pinned version:
+    // resolve the media stage via the model's own downloadMedia, then decrypt
+    // through the DownloadManager with a mock telemetry object (downloadQpl -
+    // without it the call dies on `addAnnotations`).
     const download = async (m) => {
-      const dmMod = window.require('WAWebDownloadManager');
-      const dm = dmMod.downloadManager || dmMod.default || dmMod;
-      const fn = dm.downloadAndMaybeDecrypt || dm.downloadAndDecrypt || dm.download;
-      if (!fn) throw new Error('DownloadManager method not found');
-      const buf = await fn.call(dm, {
+      if (m.mediaData && m.mediaData.mediaStage === 'REUPLOADING') {
+        throw new Error('המדיה פגה (REUPLOADING)');
+      }
+      if ((!m.mediaData || m.mediaData.mediaStage !== 'RESOLVED') && typeof m.downloadMedia === 'function') {
+        await m.downloadMedia({ downloadEvenIfExpensive: true, rmrReason: 1 });
+      }
+      if (m.mediaData && (String(m.mediaData.mediaStage).includes('ERROR') || m.mediaData.mediaStage === 'FETCHING')) {
+        throw new Error(`mediaStage=${m.mediaData.mediaStage}`);
+      }
+      const mockQpl = {
+        addAnnotations: function () { return this; },
+        addPoint: function () { return this; },
+      };
+      const dm = window.require('WAWebDownloadManager').downloadManager;
+      const buf = await dm.downloadAndMaybeDecrypt({
         directPath: m.directPath,
         encFilehash: m.encFilehash,
         filehash: m.filehash,
@@ -246,51 +260,89 @@ async function installMediaHook(client, onMedia) {
         mediaKeyTimestamp: m.mediaKeyTimestamp,
         type: m.type,
         signal: new AbortController().signal,
+        downloadQpl: mockQpl,
       });
+      if (window.WWebJS && window.WWebJS.arrayBufferToBase64Async) {
+        return await window.WWebJS.arrayBufferToBase64Async(buf);
+      }
       return toB64(buf);
     };
 
+    const buildPayload = async (m) => {
+      let dataB64 = null;
+      let lastErr = null;
+      for (let attempt = 1; attempt <= 3 && !dataB64; attempt += 1) {
+        try {
+          dataB64 = await download(m);
+        } catch (e) {
+          lastErr = e;
+          await new Promise((r) => setTimeout(r, 2000 * attempt));
+        }
+      }
+      let quotedId = null;
+      const stanza = m.quotedStanzaID;
+      if (stanza) {
+        const q = Msg.getModelsArray().find((x) => x.id && x.id.id === stanza);
+        quotedId = q ? keyToString(q.id) : stanza;
+      }
+      return {
+        msgId: keyToString(m.id),
+        chatId: m.id.remote ? (m.id.remote._serialized || String(m.id.remote)) : String(m.from || ''),
+        senderId: m.author ? (m.author._serialized || String(m.author)) : null,
+        timestamp: m.t || Math.floor(Date.now() / 1000),
+        type: m.type,
+        mimetype: m.mimetype || (m.type === 'image' ? 'image/jpeg' : 'application/octet-stream'),
+        filename: m.filename || null,
+        caption: m.caption || (m.type === 'document' ? '' : m.body || '') || '',
+        quotedId,
+        dataB64,
+        error: dataB64 ? null : (lastErr && (lastErr.message || String(lastErr))) || 'download failed',
+      };
+    };
+
+    // On-demand fetch by message id / stanza id - the node-side fallback layer.
+    window.__tripleFetchMedia = async (idStr) => {
+      try {
+        let m = Msg.get(idStr) || null;
+        if (!m && Msg.getMessagesById) {
+          try {
+            const res = await Msg.getMessagesById([idStr]);
+            m = (res && res.messages && res.messages[0]) || null;
+          } catch (e) { /* fall through to scan */ }
+        }
+        if (!m) {
+          const tail = String(idStr).split('_')[2] || idStr;
+          m = Msg.getModelsArray().find((x) => x.id && (x.id.id === tail || keyToString(x.id) === idStr)) || null;
+        }
+        if (!m) return { error: 'message not found in page collection' };
+        return await buildPayload(m);
+      } catch (e) {
+        return { error: (e && e.message) || String(e) };
+      }
+    };
+
+    if (Msg.__tripleMediaHooked) return;
     Msg.on('add', (m) => {
       try {
         if (!m || !m.isNewMsg || !m.id || m.id.fromMe) return;
         if (!['image', 'document', 'video'].includes(m.type)) return;
-        // download with retries - keys/paths can lag the collection insert
         (async () => {
-          let dataB64 = null;
-          let lastErr = null;
-          for (let attempt = 1; attempt <= 3 && !dataB64; attempt += 1) {
-            try {
-              dataB64 = await download(m);
-            } catch (e) {
-              lastErr = e;
-              await new Promise((r) => setTimeout(r, 2500 * attempt));
-            }
-          }
-          let quotedId = null;
-          const stanza = m.quotedStanzaID;
-          if (stanza) {
-            const q = Msg.getModelsArray().find((x) => x.id && x.id.id === stanza);
-            quotedId = q ? keyToString(q.id) : stanza;
-          }
-          window.onTripleMedia({
-            msgId: keyToString(m.id),
-            chatId: m.id.remote ? (m.id.remote._serialized || String(m.id.remote)) : String(m.from || ''),
-            senderId: m.author ? (m.author._serialized || String(m.author)) : null,
-            timestamp: m.t || Math.floor(Date.now() / 1000),
-            type: m.type,
-            mimetype: m.mimetype || (m.type === 'image' ? 'image/jpeg' : 'application/octet-stream'),
-            filename: m.filename || null,
-            caption: m.caption || (m.type === 'document' ? '' : m.body || '') || '',
-            quotedId,
-            dataB64,
-            error: dataB64 ? null : (lastErr && (lastErr.message || String(lastErr))) || 'download failed',
-          });
+          window.onTripleMedia(await buildPayload(m));
         })();
       } catch (e) { /* never break WhatsApp itself */ }
     });
     Msg.__tripleMediaHooked = true;
   });
   log.info('הוק מדיה הותקן ✔ (קבצים ותמונות נקלטים ישירות מהדף)');
+}
+
+// Node-side fallback: fetch + decrypt a specific message's media via the
+// page-side helper (works even when the wwebjs Message object is broken).
+async function fetchMediaById(client, msgId) {
+  return client.pupPage.evaluate(
+    (id) => (window.__tripleFetchMedia ? window.__tripleFetchMedia(id) : { error: 'hook not installed' }),
+    msgId,
+  );
 }
 
 // On the pinned WhatsApp Web version, client.sendMessage often DELIVERS the
@@ -345,5 +397,6 @@ module.exports = {
   sendAndConfirm,
   installReactionHook,
   installMediaHook,
+  fetchMediaById,
   MessageMedia,
 };

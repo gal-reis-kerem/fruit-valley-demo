@@ -3,7 +3,7 @@
 const { config } = require('./config');
 const log = require('./logger');
 const bus = require('./bus');
-const { createWhatsAppClient, listGroups, resolvePhoneId, installReactionHook, installMediaHook } = require('./whatsapp/client');
+const { createWhatsAppClient, listGroups, resolvePhoneId, installReactionHook, installMediaHook, fetchMediaById } = require('./whatsapp/client');
 const { Orchestrator } = require('./flow/orchestrator');
 const { startWebServer } = require('./web/server');
 const { readSettings, writeSettings } = require('./settings');
@@ -287,23 +287,13 @@ async function launchClient(attempt) {
             try {
               const key = `media|${chatId}|${msg.timestamp}`;
               if (processedMsgs.has(key)) return; // page hook handled it
-              log.warn('הוק הדף לא קלט את המדיה תוך 20 שניות - מנסה הורדה דרך הספרייה');
-              const media = await msg.downloadMedia().catch(() => null);
-              if (media && media.data && state.routeMediaPayload) {
-                await state.routeMediaPayload({
-                  msgId: (msg.id && (msg.id._serialized || msg.id.$1)) || `fallback_${msg.timestamp}`,
-                  chatId,
-                  senderId: msg.author || null,
-                  timestamp: msg.timestamp,
-                  type: msg.type || 'document',
-                  mimetype: media.mimetype || 'application/octet-stream',
-                  filename: media.filename || null,
-                  caption: msg.body && !/\.(pdf|xlsx?|jpe?g|png)$/i.test(msg.body.trim()) ? msg.body : '',
-                  quotedId: null,
-                  dataB64: media.data,
-                }, 'גיבוי הספרייה');
+              log.warn('הוק הדף לא קלט את המדיה תוך 20 שניות - שולף אותה מהדף לפי מזהה');
+              const msgId = (msg.id && (msg.id._serialized || msg.id.$1)) || null;
+              const payload = msgId ? await fetchMediaById(client, msgId).catch((e) => ({ error: e.message })) : { error: 'אין מזהה הודעה' };
+              if (payload && payload.dataB64 && state.routeMediaPayload) {
+                await state.routeMediaPayload(payload, 'שליפה לפי מזהה');
               } else {
-                log.error('המדיה לא נקלטה בשתי השכבות - הקובץ לא טופל. שלחו את התוכן כטקסט או דווחו ל-Triple');
+                log.error(`המדיה לא נקלטה בשתי השכבות (${payload && payload.error}) - הקובץ לא טופל. שלחו את התוכן כטקסט או דווחו ל-Triple`);
               }
             } catch (err) {
               log.error('שכבת הגיבוי למדיה נכשלה:', err.message);
