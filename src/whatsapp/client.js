@@ -350,6 +350,27 @@ async function fetchMediaById(client, msgId) {
   );
 }
 
+// Outgoing messages are SERIALIZED and PACED at a human-like rhythm - a
+// burst of sends (e.g. the morning fixed-order issuance) goes out one at a
+// time with a minimum gap + jitter. Keeps the account's traffic profile calm.
+let sendQueue = Promise.resolve();
+let lastSendAt = 0;
+function pacedSend(task) {
+  const run = sendQueue.then(async () => {
+    const minGap = Number(process.env.SEND_MIN_GAP_MS || 2500);
+    const gap = minGap + Math.floor(Math.random() * 1500);
+    const wait = lastSendAt + gap - Date.now();
+    if (wait > 0) await sleep(wait);
+    try {
+      return await task();
+    } finally {
+      lastSendAt = Date.now();
+    }
+  });
+  sendQueue = run.catch(() => {});
+  return run;
+}
+
 // On the pinned WhatsApp Web version, client.sendMessage often DELIVERS the
 // message but resolves to undefined (the response serializer is broken).
 // Send, then recover the real message id from the chat's own message log so
@@ -357,7 +378,7 @@ async function fetchMediaById(client, msgId) {
 async function sendAndConfirm(client, chatId, content, options = {}) {
   let sent = null;
   try {
-    sent = await client.sendMessage(chatId, content, options);
+    sent = await pacedSend(() => client.sendMessage(chatId, content, options));
   } catch (err) {
     log.warn(`sendMessage זרק שגיאה (${err.message}) - בודק אם ההודעה בכל זאת נשלחה`);
   }

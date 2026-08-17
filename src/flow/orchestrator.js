@@ -96,7 +96,14 @@ class Orchestrator {
 
   // msg.reply quotes the original message; on broken WhatsApp Web versions the
   // quoting path can fail, so fall back to a plain send to the same chat.
+  // Observe mode: replies to PRIVATE chats (customers) are suppressed and
+  // surfaced in the terminal instead; group replies (our demo groups) stay.
   async safeReply(msg, text) {
+    if (config.observeMode && !String(msg.from || '').endsWith('@g.us')) {
+      log.info(`(מצב תצפית) תשובה ללקוח לא נשלחה: "${String(text).slice(0, 100)}"`);
+      bus.naama(`(תצפית - לא נשלח) הייתי עונה ללקוח: ${String(text).slice(0, 80)}`);
+      return null;
+    }
     try {
       return await msg.reply(text);
     } catch (err) {
@@ -106,6 +113,7 @@ class Orchestrator {
   }
 
   async safeReact(msg, emoji) {
+    if (config.observeMode && !String(msg.from || '').endsWith('@g.us')) return;
     try {
       await msg.react(emoji);
     } catch (err) {
@@ -731,12 +739,14 @@ class Orchestrator {
     if (!company) {
       this.pendingEmail = { doc, payload, candidates, at: Date.now() };
       const names = candidates.map((c) => c.name).join(' / ');
+      const question = `📧 התקבל מייל הזמנה מ-${from}${subject ? ` ("${subject}")` : ''}, אבל הכתובת משויכת לכמה לקוחות: ${names}.\nלאיזה לקוח שייכת ההזמנה?`;
+      if (config.observeMode) {
+        bus.naama(`(תצפית - לא נשלח) ${question}`);
+        log.info(`(מצב תצפית) שאלת שיוך מייל לא נשלחה לנציג: ${names}`);
+        return;
+      }
       bus.naama(`מייל הזמנה מ-${from} משויך לכמה לקוחות — שואלת את הנציג בוואטסאפ`);
-      await sendAndConfirm(
-        this.client,
-        config.sourceContactId,
-        `📧 התקבל מייל הזמנה מ-${from}${subject ? ` ("${subject}")` : ''}, אבל הכתובת משויכת לכמה לקוחות: ${names}.\nלאיזה לקוח שייכת ההזמנה?`,
-      );
+      await sendAndConfirm(this.client, config.sourceContactId, question);
       return;
     }
     await this.createOrdersFromDoc(company, doc, `מייל מ-${from}: ${subject}`);

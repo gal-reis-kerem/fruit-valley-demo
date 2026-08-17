@@ -29,6 +29,10 @@ const config = {
         { name: 'טריפל', nameEn: 'Triple', initials: 'TR', aliases: ['triple', 'טריפל'] },
         { name: "סולראדג'", nameEn: 'Solar-edge', initials: 'SE', aliases: ['סולראדג', 'סולר אדג', 'סולאראדג', 'solaredge', 'solar edge', 'solar-edge'] },
       ],
+  // Observe mode: full processing (orders, PDFs, kanban, demo groups) but NO
+  // private messages to customers - replies surface in Naama's terminal only.
+  // The safety switch for running against a customer's real WhatsApp.
+  observeMode: ['1', 'true'].includes(String(process.env.OBSERVE_MODE || '').toLowerCase()),
   webPort: Number(process.env.WEB_PORT || 3010),
   pickingGroupName: process.env.PICKING_GROUP_NAME || '',
   photosGroupName: process.env.PHOTOS_GROUP_NAME || '',
