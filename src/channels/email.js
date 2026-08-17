@@ -106,10 +106,21 @@ async function pollOnce(getFlow) {
       const startUid = state.lastUid + 1;
       // on the very first run only look back one day - older mail is history
       const range = state.lastUid ? `${startUid}:*` : { since: new Date(Date.now() - 24 * 3600 * 1000) };
-      for await (const msg of client.fetch(range, { uid: true, envelope: true, source: true }, { uid: Boolean(state.lastUid) })) {
+      // Orders are same-day business: an email RECEIVED on a previous day is
+      // stale and must never become an order - even after downtime, only mail
+      // whose arrival date is TODAY (Israel time) is processed.
+      const israelDayOf = (d) => new Date(d).toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' });
+      const today = israelDayOf(new Date());
+      let stale = 0;
+      for await (const msg of client.fetch(range, { uid: true, envelope: true, internalDate: true, source: true }, { uid: Boolean(state.lastUid) })) {
         if (msg.uid <= state.lastUid) continue;
         report.seen += 1;
         state.lastUid = Math.max(state.lastUid, msg.uid);
+        const receivedAt = msg.internalDate || (msg.envelope && msg.envelope.date);
+        if (!receivedAt || israelDayOf(receivedAt) !== today) {
+          stale += 1;
+          continue; // yesterday's (or older) mail - skipped, uid advanced
+        }
         const fromAddr = (msg.envelope.from && msg.envelope.from[0] && msg.envelope.from[0].address || '').toLowerCase();
         const candidates = sheets.contactCompaniesByEmail(fromAddr);
         if (!candidates.length) continue; // not a CRM contact - ignore silently
@@ -141,6 +152,7 @@ async function pollOnce(getFlow) {
           log.error(`טיפול במייל מ-${redactEmail(fromAddr)} נכשל: ${err.message}`);
         }
       }
+      if (stale) log.info(`ערוץ המייל: ${stale} מיילים מימים קודמים דולגו (רק מיילים מהיום הופכים להזמנות)`);
       saveState(state);
     } finally {
       lock.release();
