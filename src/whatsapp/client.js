@@ -201,13 +201,24 @@ async function installReactionHook(client, onReactions) {
 // incoming media message is downloaded and decrypted IN PAGE (via WhatsApp's
 // own DownloadManager) and forwarded to the callback as plain data. Call
 // after 'ready'; safe to call again after relaunch.
-async function installMediaHook(client, onMedia) {
+async function installMediaHook(client, onMedia, onEdit = null) {
   try {
     await client.pupPage.exposeFunction('onTripleMedia', (payload) => {
       try {
         onMedia(payload);
       } catch (err) {
         log.error('טיפול במדיה נכשל:', err.message);
+      }
+    });
+  } catch (err) {
+    // already exposed on this page - fine
+  }
+  try {
+    await client.pupPage.exposeFunction('onTripleEdit', (payload) => {
+      try {
+        if (onEdit) onEdit(payload);
+      } catch (err) {
+        log.error('טיפול בעריכת הודעה נכשל:', err.message);
       }
     });
   } catch (err) {
@@ -323,6 +334,23 @@ async function installMediaHook(client, onMedia) {
     };
 
     if (Msg.__tripleMediaHooked) return;
+    // Customers sometimes EDIT their original order message instead of
+    // sending a new one. Forward every body/caption change with old+new text;
+    // the node side decides whether it affects an order.
+    Msg.on('change:body change:caption', (m, newBody, prevBody) => {
+      try {
+        if (!m || !m.id || m.id.fromMe) return;
+        if (newBody === undefined || newBody === prevBody) return;
+        window.onTripleEdit({
+          msgId: keyToString(m.id),
+          chatId: m.id.remote ? (m.id.remote._serialized || String(m.id.remote)) : String(m.from || ''),
+          newBody: String(newBody || ''),
+          prevBody: String(prevBody || ''),
+          timestamp: m.t || Math.floor(Date.now() / 1000),
+          type: m.type,
+        });
+      } catch (e) { /* never break WhatsApp itself */ }
+    });
     Msg.on('add', (m) => {
       try {
         if (!m || !m.isNewMsg || !m.id) return;

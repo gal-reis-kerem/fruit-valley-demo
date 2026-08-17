@@ -82,42 +82,76 @@ function markProcessed(key) {
   }
 }
 
-// Process text messages that arrived while the system was off. Scans the
-// in-memory message store of every private chat for messages newer than the
-// last time we were online, and runs them through the normal flow.
+// Catch up on everything that arrived while the system was off (computer
+// asleep, no internet, app closed). lastSeenTs remembers the last moment we
+// were alive; on reconnect every newer message - TEXT AND MEDIA, private
+// chats AND our two groups - is pulled from WhatsApp's own message store and
+// run through the normal flow. Media is fetched by id via the page helper.
 async function backfillOffline(client, flow) {
   const { lastSeenTs } = readSettings();
   if (!lastSeenTs) return;
   const cutoffSec = Math.floor(lastSeenTs / 1000);
 
-  const found = await client.pupPage.evaluate((cutoff) => {
+  const groupIds = [
+    state.flow && state.flow.pickingGroup && state.flow.pickingGroup.id._serialized,
+    state.flow && state.flow.photosGroup && state.flow.photosGroup.id._serialized,
+  ].filter(Boolean);
+
+  const found = await client.pupPage.evaluate((cutoff, ourGroups) => {
     const out = [];
-    let skippedMedia = 0;
+    const keyToString = (k) =>
+      k ? k._serialized || k.$1 || [k.fromMe, k.remote && (k.remote._serialized || String(k.remote)), k.id].join('_') : null;
     const chats = window.require('WAWebCollections').Chat.getModelsArray();
     for (const c of chats) {
-      if (!c.id || c.id.server === 'g.us') continue;
+      if (!c.id) continue;
+      const chatId = c.id._serialized;
+      const isGroup = c.id.server === 'g.us';
+      if (isGroup && !ourGroups.includes(chatId)) continue;
       const msgs = (c.msgs && c.msgs.getModelsArray()) || [];
       for (const m of msgs) {
-        if (!m.id || m.id.fromMe) continue;
-        if ((m.t || 0) <= cutoff) continue;
-        if (m.type !== 'chat' || !m.body) {
-          skippedMedia += 1;
-          continue;
+        if (!m.id || (m.t || 0) <= cutoff) continue;
+        const isMedia = ['image', 'document', 'video'].includes(m.type);
+        // own messages: only group photos matter (the operator may shoot from
+        // the bot's own account); everything else own-sent is ours anyway
+        if (m.id.fromMe && !(isMedia && m.type === 'image' && isGroup)) continue;
+        if (isMedia) {
+          out.push({ chatId, msgId: keyToString(m.id), t: m.t, media: true });
+        } else if (m.type === 'chat' && m.body) {
+          if (m.id.fromMe) continue;
+          out.push({ chatId, body: m.body, t: m.t, media: false });
         }
-        out.push({ chatId: c.id._serialized, body: m.body, t: m.t });
       }
     }
-    return { msgs: out.sort((a, b) => a.t - b.t), skippedMedia };
-  }, cutoffSec);
+    return { msgs: out.sort((a, b) => a.t - b.t) };
+  }, cutoffSec, groupIds);
 
   let handled = 0;
   for (const m of found.msgs) {
+    if (m.media) {
+      // media (files/photos) - fetched and decrypted by id, then routed
+      // exactly like live media (routeMediaPayload dedups by message id)
+      try {
+        const payload = await fetchMediaById(client, m.msgId);
+        if (payload && payload.dataB64 && state.routeMediaPayload) {
+          handled += 1;
+          bus.naama('מטפלת בקובץ שהתקבל כשהמערכת הייתה כבויה');
+          await state.routeMediaPayload(payload, 'השלמת השבתה');
+        } else {
+          log.warn(`קובץ מזמן ההשבתה לא נשלף (${payload && payload.error}) - שלחו אותו שוב`);
+        }
+      } catch (err) {
+        log.error('השלמת קובץ נכשלה:', err.message);
+      }
+      continue;
+    }
+
     const key = `${m.chatId}|${m.t}`;
     if (processedMsgs.has(key)) continue;
     const phoneId = await resolvePhoneId(client, m.chatId);
     const crmCompanies = sheets.contactCompanies(phoneId);
     const isRep = phoneId === config.sourceContactId;
-    if (!isRep && !crmCompanies.length) continue;
+    const isGroup = m.chatId.endsWith('@g.us');
+    if (!isGroup && !isRep && !crmCompanies.length) continue;
 
     markProcessed(key);
     handled += 1;
@@ -132,16 +166,19 @@ async function backfillOffline(client, flow) {
         throw new Error('backfill message - plain send instead');
       },
     };
-    const forcedCompany = !isRep && crmCompanies.length === 1 ? crmCompanies[0] : null;
-    const candidates = crmCompanies.length > 1 ? crmCompanies : null;
     try {
-      await flow.handleCustomerMessage(pseudoMsg, forcedCompany, candidates);
+      if (isGroup) {
+        await flow.handleGroupText(pseudoMsg);
+      } else {
+        const forcedCompany = !isRep && crmCompanies.length === 1 ? crmCompanies[0] : null;
+        const candidates = crmCompanies.length > 1 ? crmCompanies : null;
+        await flow.handleCustomerMessage(pseudoMsg, forcedCompany, candidates);
+      }
     } catch (err) {
       log.error('השלמת הודעה נכשלה:', err.message);
     }
   }
-  if (handled) log.info(`הושלמו ${handled} הודעות מזמן ההשבתה`);
-  if (found.skippedMedia) log.warn(`${found.skippedMedia} הודעות מדיה מזמן ההשבתה לא נקלטו אוטומטית`);
+  if (handled) log.info(`הושלמו ${handled} הודעות/קבצים מזמן ההשבתה`);
   writeSettings({ lastSeenTs: Date.now() });
 }
 
@@ -397,6 +434,24 @@ async function launchClient(attempt) {
     };
     state.routeMediaPayload = routeMediaPayload;
 
+    // Edited messages: dedup per (message, new text) since the collection can
+    // fire the change event more than once, then route to the flow.
+    const editSeen = new Set();
+    const handleEditPayload = async (payload) => {
+      if (!payload || !payload.msgId || !payload.newBody) return;
+      const editKey = `${payload.msgId}|${require('crypto').createHash('sha1').update(payload.newBody).digest('hex').slice(0, 10)}`;
+      if (editSeen.has(editKey)) return;
+      editSeen.add(editKey);
+      if (payload.chatId.endsWith('@g.us')) return; // group text edits - not order flow
+      const phoneId = await resolvePhoneId(client, payload.chatId);
+      const crmCompanies = sheets.contactCompanies(phoneId);
+      const isRep = phoneId === config.sourceContactId;
+      if (!isRep && !crmCompanies.length) return;
+      const forcedCompany = !isRep && crmCompanies.length === 1 ? crmCompanies[0] : null;
+      const candidates = crmCompanies.length > 1 ? crmCompanies : null;
+      await flow.handleEditedMessage(payload, forcedCompany, candidates);
+    };
+
     try {
       await installMediaHook(client, (payload) => {
         if (payload && !payload.dataB64) {
@@ -404,6 +459,8 @@ async function launchClient(attempt) {
           return;
         }
         routeMediaPayload(payload, 'הוק הדף').catch((err) => log.error('שגיאה בטיפול במדיה:', err));
+      }, (payload) => {
+        handleEditPayload(payload).catch((err) => log.error('שגיאה בטיפול בעריכה:', err));
       });
     } catch (err) {
       log.error('התקנת הוק המדיה נכשלה:', err.message);

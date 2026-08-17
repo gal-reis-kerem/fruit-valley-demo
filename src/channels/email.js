@@ -16,6 +16,12 @@ const settings = require('../settings');
 const bus = require('../bus');
 
 const STATE_FILE = () => path.join(config.dataDir, 'email-state.json');
+// Full addresses never reach logs/terminals - "d***@fruitvalley.co.il"
+const redactEmail = (a) => {
+  const s = String(a || '');
+  const at = s.indexOf('@');
+  return at > 0 ? `${s[0]}***${s.slice(at)}` : s;
+};
 let pollTimer = null;
 const status = { configured: false, ok: null, error: null, lastPoll: null, processed: 0 };
 
@@ -121,7 +127,7 @@ async function pollOnce(getFlow) {
           state.lastUid = msg.uid - 1; // reprocess next time
           break;
         }
-        bus.naama(`התקבל מייל מ-${fromAddr} (${parsed.subject || 'ללא נושא'})`);
+        bus.naama(`התקבל מייל מ-${redactEmail(fromAddr)} (${parsed.subject || 'ללא נושא'})`);
         try {
           await flow.handleEmailOrder(candidates, {
             from: fromAddr,
@@ -132,7 +138,7 @@ async function pollOnce(getFlow) {
           report.handled += 1;
           status.processed += 1;
         } catch (err) {
-          log.error(`טיפול במייל מ-${fromAddr} נכשל: ${err.message}`);
+          log.error(`טיפול במייל מ-${redactEmail(fromAddr)} נכשל: ${err.message}`);
         }
       }
       saveState(state);
@@ -155,7 +161,7 @@ function startPolling(getFlow, intervalMs = 2 * 60 * 1000) {
   const run = () => pollOnce(getFlow).catch((err) => log.warn(`סבב מייל נכשל: ${err.message}`));
   run();
   pollTimer = setInterval(run, intervalMs);
-  log.info(`ערוץ המייל פעיל (${creds().user})`);
+  log.info(`ערוץ המייל פעיל (${redactEmail(creds().user)})`);
   return true;
 }
 

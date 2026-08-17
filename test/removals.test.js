@@ -72,3 +72,32 @@ test('לקוח משלם עם כמה משרדים: בלי ציון משרד בה�
   // לקוח בלי לקוח משלם -> אין דו-משמעות
   assert.strictEqual(flow.ambiguousOffice(config.companies[3], 'הזמנה לאלמה'), null);
 });
+
+test('עריכת הודעה: החלפת תרומה ובנייה מחדש דטרמיניסטית', () => {
+  const flow = new Orchestrator({}, { pickingGroup: { id: { _serialized: 'x' }, name: 'x' }, photosGroup: null });
+  const order = {
+    baseSnapshot: [item('בננה', null)],
+    contribs: [],
+    items: [],
+  };
+  // הודעה מקורית: +2 מלפפונים
+  const msg1 = { id: { _serialized: 'true_x_AAA' } };
+  flow.recordContribution(order, msg1, { items: [{ product_he: 'מלפפון', quantity: 2, action: 'add' }] });
+  // תוספת מאוחרת: +אבטיח
+  const msg2 = { id: { _serialized: 'true_x_BBB' } };
+  flow.recordContribution(order, msg2, { items: [{ product_he: 'אבטיח', quantity: 1, action: 'add' }] }, { printed: true });
+  flow.rebuildFromContribs(order);
+  assert.deepStrictEqual(order.items.map((i) => i.product_he), ['בננה', 'מלפפון', 'אבטיח']);
+
+  // הלקוח ערך את ההודעה הראשונה: 3 מלפפונים במקום 2 + בלי בננות
+  const contrib = order.contribs.find((c) => Orchestrator.stanzaEq(c.key, 'false_y_AAA'));
+  assert.ok(contrib, 'התאמה לפי מזהה stanza גם בפורמט שונה');
+  contrib.items = [
+    { product_he: 'מלפפון', quantity: 3, action: 'add' },
+    { product_he: 'בננות', action: 'remove' },
+  ];
+  flow.rebuildFromContribs(order);
+  assert.deepStrictEqual(order.items.map((i) => i.product_he), ['מלפפון', 'אבטיח']);
+  assert.strictEqual(order.items[0].quantity, 3, 'הכמות החדשה מהעריכה');
+  assert.strictEqual(order.items[1].addedAfterPrint, true, 'דגל אחרי-הדפסה של התוספת נשמר');
+});

@@ -145,6 +145,42 @@ class Orchestrator {
     return sa === sb || sa.includes(sb) || sb.includes(sa);
   }
 
+  // ---------- message contributions (edit support) ----------
+  // Every WhatsApp message that shaped an order is recorded as a
+  // "contribution" (its message id + the items it parsed to). When the
+  // customer EDITS a message, its contribution is replaced and the order is
+  // rebuilt deterministically: base snapshot -> contributions in order.
+  static msgKeyOf(msg) {
+    return (msg && msg.id && (msg.id._serialized || msg.id.$1)) || null;
+  }
+
+  static stanzaEq(a, b) {
+    if (!a || !b) return false;
+    const stanza = (s) => {
+      const parts = String(s).split('_');
+      return parts.length >= 3 ? parts[2] : parts[parts.length - 1];
+    };
+    return a === b || stanza(a) === stanza(b);
+  }
+
+  recordContribution(order, msg, parsed, { printed = false, late = false } = {}) {
+    const key = Orchestrator.msgKeyOf(msg);
+    if (!key) return;
+    order.contribs = order.contribs || [];
+    order.contribs.push({ key, items: parsed.items, printed, late });
+  }
+
+  rebuildFromContribs(order) {
+    const items = JSON.parse(JSON.stringify(order.baseSnapshot || []));
+    for (const c of order.contribs || []) {
+      const removals = c.items.filter((it) => it.action === 'remove');
+      const additions = c.items.filter((it) => it.action !== 'remove');
+      Orchestrator.removeItems(items, removals);
+      items.push(...additions.map((it) => ({ ...it, addedAfterPrint: c.printed, addedLate: c.late })));
+    }
+    order.items = items;
+  }
+
   // Removes ALL matching items (across floors unless the removal names one).
   // Returns { removed: [...], notFound: [...] }.
   static removeItems(items, removals) {
@@ -419,6 +455,7 @@ class Orchestrator {
     // stored base order (with full audit of base version + changes).
     let items = parsed.items;
     let baseAudit = null;
+    let baseSnapshot = [];
     const crm = company.crm || null;
     if (crm && crm.orderType === 'fixed') {
       const base = baseOrders.baseFor(crm.key, deliveryDate);
@@ -431,6 +468,7 @@ class Orchestrator {
       const additions = parsed.items.filter((it) => it.action !== 'remove');
       const removals = parsed.items.filter((it) => it.action === 'remove');
       items = [...base.items];
+      baseSnapshot = JSON.parse(JSON.stringify(base.items));
       const { removed } = Orchestrator.removeItems(items, removals);
       items.push(...additions);
       baseAudit = { baseVersion: base.versionId, added: additions.length, removed: removed.length };
@@ -451,6 +489,8 @@ class Orchestrator {
       order.sourceChannel = 'whatsapp';
       order.sourceFormat = crm.format === 'pdf' ? 'freetext' : crm.format;
     }
+    order.baseSnapshot = baseSnapshot;
+    this.recordContribution(order, msg, parsed);
     if (baseAudit) {
       order.baseAudit = baseAudit;
       store.addHistory(order, 'base_order_applied', `בסיס ${baseAudit.baseVersion}: +${baseAudit.added} / -${baseAudit.removed} שינויים`);
@@ -488,6 +528,7 @@ class Orchestrator {
   async applyAddition(msg, order, parsed, rawBody) {
     const printed = Boolean(order.reaction); // a reaction means the sheet is printed
     const late = this.isAfterCutoff();
+    this.recordContribution(order, msg, parsed, { printed, late: !printed && late });
 
     const added = parsed.items.filter((it) => it.action !== 'remove');
     const removals = parsed.items.filter((it) => it.action === 'remove');
@@ -588,6 +629,93 @@ class Orchestrator {
     );
   }
 
+  // ---------- edited customer messages ----------
+  // The customer edited a message instead of sending a new one. If that
+  // message shaped an open order, its contribution is re-parsed and the order
+  // is rebuilt; otherwise the edited text is processed as a fresh message.
+  async handleEditedMessage({ chatId, msgId, newBody }, forcedCompany = null, contactCandidates = null) {
+    this.reload();
+    log.info(`הודעה נערכה ע"י הלקוח: "${String(newBody).slice(0, 60)}"`);
+
+    const order = this.db.orders.find(
+      (o) => (o.contribs || []).some((c) => Orchestrator.stanzaEq(c.key, msgId)),
+    );
+
+    const pseudoMsg = {
+      id: { _serialized: msgId },
+      from: chatId,
+      body: newBody,
+      hasMedia: false,
+      timestamp: Math.floor(Date.now() / 1000),
+      reply: async () => { throw new Error('edited message - plain send'); },
+    };
+
+    if (!order) {
+      // an edit of a message we never turned into an order - process as new
+      bus.naama('לקוח ערך הודעה שלא שויכה להזמנה — מטפלת בה כהודעה חדשה');
+      return this.handleCustomerMessage(pseudoMsg, forcedCompany, contactCandidates);
+    }
+    if (['cancelled', 'archived', 'documented'].includes(order.status)) {
+      bus.naama(`לקוח ערך הודעה של הזמנה ${order.id} שכבר ${order.status === 'documented' ? 'לוקטה' : 'נסגרה'} — דורש טיפול ידני`);
+      await this.safeReply(pseudoMsg, `שמתי לב שערכת את ההודעה, אבל ההזמנה ${order.id} כבר ${order.status === 'documented' ? 'לוקטה' : 'נסגרה'} - נציג אנושי יבדוק את השינוי 🙏`);
+      return;
+    }
+
+    bus.naama(`לקוח ערך הודעה של הזמנה ${order.id} — מעדכנת את הרשימה`, true);
+    let parsed;
+    try {
+      parsed = await parseOrderMessage(newBody);
+    } catch (err) {
+      log.error('פרסור הודעה ערוכה נכשל:', err.message);
+      await this.safeReply(pseudoMsg, '⚠️ לא הצלחתי לעבד את ההודעה הערוכה, נציג אנושי יטפל בה.');
+      return;
+    }
+
+    // replace that message's contribution and rebuild deterministically
+    const contrib = order.contribs.find((c) => Orchestrator.stanzaEq(c.key, msgId));
+    const printed = Boolean(order.reaction);
+    contrib.items = parsed.items;
+    this.rebuildFromContribs(order);
+    if (parsed.customer_note) order.customerNote = parsed.customer_note;
+    order.rawMessages = order.rawMessages || [];
+    order.rawMessages.push(`(נערכה) ${newBody}`);
+    store.addHistory(order, 'customer_edited', `הלקוח ערך הודעה - הרשימה נבנתה מחדש (${order.items.length} פריטים)`);
+    this.save();
+
+    await this.safeReply(pseudoMsg, `קלטתי את העריכה - ההזמנה ${order.id} עודכנה בהתאם ✔`);
+
+    if (printed) {
+      // picking already started: targeted note to the pickers + full regenerated
+      // sheet to the customer folder + alert in the photos group
+      order.version += 1;
+      await generatePickingSheetPDF(order);
+      store.addHistory(order, 'pdf_regenerated', `גרסה ${order.version} הופקה בעקבות עריכת הודעה (אחרי הדפסה)`);
+      order.postPrintChanges = order.postPrintChanges || [];
+      order.postPrintChanges.push({ ts: new Date().toISOString(), text: 'הלקוח ערך את ההזמנה - רשימה מעודכנת' });
+      this.save();
+      await sendAndConfirm(
+        this.client,
+        this.pickingGroup.id._serialized,
+        `✏️ *הזמנה ${order.id} (${order.customerName}) עודכנה בעקבות עריכת הודעת הלקוח* - הרשימה המעודכנת:\n` +
+          order.items.map((it) => `• ${it.product_he}${it.quantity ? ` - ${it.quantity} ${it.unit}` : ''}`).join('\n'),
+        order.groupMsgId ? { quotedMessageId: order.groupMsgId } : {},
+      );
+      if (this.photosGroup && order.photoRequestMsgId) {
+        await sendAndConfirm(
+          this.client,
+          this.photosGroup.id._serialized,
+          `⚠️ שימו לב שההזמנה של *${order.customerName}* עודכנה אחרי ההדפסה (עריכת הודעה) - גרסה ${order.version}`,
+          { quotedMessageId: order.photoRequestMsgId },
+        );
+      }
+      bus.yuval(`עריכת לקוח אחרי הדפסה — עדכנתי את המלקטים והפקתי גרסה ${order.version} · ${order.id}`);
+    } else {
+      order.version += 1;
+      this.save();
+      await this.sendPickingSheet(order, { updated: true });
+    }
+  }
+
   // ---------- non-WhatsApp channels: schedule / sheet / email ----------
 
   // Shared creation path for orders born outside a WhatsApp chat.
@@ -600,6 +728,8 @@ class Orchestrator {
     if (existing) {
       if (!replaceExisting) return { order: existing, created: false };
       existing.items = items;
+      existing.baseSnapshot = JSON.parse(JSON.stringify(items));
+      existing.contribs = []; // the channel content replaced everything
       if (customerNote) existing.customerNote = customerNote;
       existing.version += 1;
       store.addHistory(existing, 'channel_update', `תוכן ההזמנה הוחלף מעדכון ${sourceChannel} (גרסה ${existing.version})`);
@@ -617,6 +747,7 @@ class Orchestrator {
       items,
       rawMessage,
     });
+    order.baseSnapshot = JSON.parse(JSON.stringify(items)); // edits rebuild on top of this
     order.displayMode = crm.displayMode;
     order.sourceChannel = sourceChannel;
     order.sourceFormat = sourceFormat;
@@ -717,11 +848,11 @@ class Orchestrator {
         doc = await parseTextOrders(text, { hint: `גוף מייל הזמנה (נושא: ${subject})` });
       }
     } catch (err) {
-      log.error(`פרסור מייל מ-${from} נכשל: ${err.message}`);
+      log.error(`פרסור מייל נכשל: ${err.message}`);
     }
     if (!doc || !doc.orders.length || !doc.orders.some((o) => o.items.length)) {
-      bus.naama(`מייל מ-${from} לא הניב הזמנה קריאה — הועבר לבדיקה ידנית`);
-      log.warn(`מייל מ-${from} ("${subject}") ללא פריטים - manual review`);
+      bus.naama('מייל הזמנה לא הניב הזמנה קריאה — הועבר לבדיקה ידנית');
+      log.warn(`מייל ("${subject}") ללא פריטים - manual review`);
       return;
     }
 
@@ -745,7 +876,7 @@ class Orchestrator {
         log.info(`(מצב תצפית) שאלת שיוך מייל לא נשלחה לנציג: ${names}`);
         return;
       }
-      bus.naama(`מייל הזמנה מ-${from} משויך לכמה לקוחות — שואלת את הנציג בוואטסאפ`);
+      bus.naama(`מייל הזמנה משויך לכמה לקוחות — שואלת את הנציג בוואטסאפ`);
       await sendAndConfirm(this.client, config.sourceContactId, question);
       return;
     }
