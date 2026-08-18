@@ -15,8 +15,11 @@ const statsMod = require('./stats');
 const { workerChat } = require('./ai/workerChat');
 const { sendAndConfirm } = require('./whatsapp/client');
 
-// A single failed operation must not kill the whole digital worker (NFR-07)
+// A single failed operation must not kill the whole digital worker (NFR-07).
+// uncaughtException is the last net: a stray socket/library error must never
+// take down the app with a crash dialog - log it and keep running.
 process.on('unhandledRejection', (err) => log.error('שגיאה לא מטופלת:', err));
+process.on('uncaughtException', (err) => log.error('חריגה לא תפוסה (המערכת ממשיכה):', err));
 
 const state = { client: null, state: 'stopped', running: false, qr: null, error: null, flow: null };
 let exitOnError = true;

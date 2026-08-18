@@ -59,7 +59,19 @@ async function connect() {
     secure: true,
     auth: { user: c.user, pass: c.pass },
     logger: false,
+    // a hung socket should fail fast (we reconnect every poll anyway)
+    socketTimeout: 90 * 1000,
+    greetingTimeout: 30 * 1000,
   });
+  // CRITICAL: without an 'error' listener, a socket timeout between
+  // operations becomes an UNCAUGHT exception and crashes the whole app
+  // ("A JavaScript error occurred in the main process").
+  client.on('error', (err) => {
+    status.ok = false;
+    status.error = err.message;
+    log.warn(`שגיאת חיבור מייל (סוקט): ${err.message} - הסבב הבא יתחבר מחדש`);
+  });
+  client.on('close', () => { /* expected between polls */ });
   await client.connect();
   return client;
 }
