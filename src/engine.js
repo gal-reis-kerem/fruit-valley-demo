@@ -110,7 +110,7 @@ async function backfillOffline(client, flow) {
       const msgs = (c.msgs && c.msgs.getModelsArray()) || [];
       for (const m of msgs) {
         if (!m.id || (m.t || 0) <= cutoff) continue;
-        const isMedia = ['image', 'document', 'video'].includes(m.type);
+        const isMedia = ['image', 'document', 'video', 'ptt', 'audio'].includes(m.type);
         // own messages: only group photos matter (the operator may shoot from
         // the bot's own account); everything else own-sent is ours anyway
         if (m.id.fromMe && !(isMedia && m.type === 'image' && isGroup)) continue;
@@ -281,6 +281,17 @@ async function launchClient(attempt) {
     const flow = new Orchestrator(client, { pickingGroup, photosGroup });
     state.flow = flow;
     state.error = null;
+
+    // Observe mode: LOCK the send layer to the two demo groups. Any send to
+    // any other chat (customers included) is dropped at the lowest level -
+    // no code path can bypass it.
+    const { setAllowedSendTargets } = require('./whatsapp/client');
+    if (config.observeMode) {
+      setAllowedSendTargets([pickingGroup.id._serialized, photosGroup && photosGroup.id._serialized].filter(Boolean));
+      log.info('מצב תצפית פעיל: שליחה מותרת אך ורק לשתי קבוצות הדמו - אף הודעה לא תישלח ללקוחות');
+    } else {
+      setAllowedSendTargets(null);
+    }
     log.info(`קבוצת ליקוט: "${pickingGroup.name}"${photosGroup ? ` | קבוצת תמונות: "${photosGroup.name}"` : ''}`);
     setState('connected');
     log.info('ממתין להזמנות… 🍎');
@@ -397,6 +408,51 @@ async function launchClient(attempt) {
       markProcessed(key);
       writeSettings({ lastSeenTs: Date.now() });
       log.info(`מדיה נקלטה (${via}): ${payload.type} (${payload.filename || payload.mimetype})${payload.fromMe ? ' [מהחשבון של הבוט]' : ''}${payload.caption ? ` + טקסט "${payload.caption.slice(0, 40)}"` : ''}`);
+
+      // Voice notes: transcribe, then run the TEXT through the normal flow.
+      // Without a transcription key - honest manual-review alert, never a guess.
+      if (['ptt', 'audio'].includes(payload.type)) {
+        const transcribe = require('./ai/transcribe');
+        let transcript = null;
+        try {
+          transcript = await transcribe.transcribeAudio(Buffer.from(payload.dataB64, 'base64'), payload.mimetype);
+        } catch (err) {
+          log.warn(`תמלול הודעה קולית נכשל: ${err.message}`);
+        }
+        if (!transcript) {
+          bus.naama(transcribe.available()
+            ? 'הודעה קולית התקבלה אך התמלול נכשל — נדרש טיפול ידני'
+            : 'הודעה קולית התקבלה — אין מפתח תמלול (OPENAI_API_KEY), נדרש טיפול ידני');
+          return;
+        }
+        bus.naama(`הודעה קולית תומללה: "${transcript.slice(0, 60)}"`);
+        const voiceMsg = {
+          id: { _serialized: payload.msgId },
+          from: payload.chatId,
+          author: payload.senderId,
+          body: transcript,
+          hasMedia: false,
+          timestamp: payload.timestamp,
+          reply: async (text) => client.sendMessage(payload.chatId, text),
+        };
+        const inGroup = payload.chatId.endsWith('@g.us');
+        if (inGroup) {
+          const ours = payload.chatId === pickingGroup.id._serialized ||
+            (photosGroup && payload.chatId === photosGroup.id._serialized);
+          if (ours) await flow.handleGroupText(voiceMsg);
+          return;
+        }
+        const phoneIdV = await resolvePhoneId(client, payload.chatId);
+        const crmV = sheets.contactCompanies(phoneIdV);
+        const isRepV = phoneIdV === config.sourceContactId;
+        if (!isRepV && !crmV.length) return;
+        await flow.handleCustomerMessage(
+          voiceMsg,
+          !isRepV && crmV.length === 1 ? crmV[0] : null,
+          crmV.length > 1 ? crmV : null,
+        );
+        return;
+      }
 
       const pseudoMsg = {
         id: { _serialized: payload.msgId },

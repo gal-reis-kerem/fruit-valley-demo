@@ -354,7 +354,7 @@ async function installMediaHook(client, onMedia, onEdit = null) {
     Msg.on('add', (m) => {
       try {
         if (!m || !m.isNewMsg || !m.id) return;
-        if (!['image', 'document', 'video'].includes(m.type)) return;
+        if (!['image', 'document', 'video', 'ptt', 'audio'].includes(m.type)) return;
         // own outgoing media is forwarded ONLY for images: packing photos may
         // be sent from the very account the bot runs on. The bot itself sends
         // only PDFs/text, so own documents (our picking sheets) stay filtered.
@@ -376,6 +376,15 @@ async function fetchMediaById(client, msgId) {
     (id) => (window.__tripleFetchMedia ? window.__tripleFetchMedia(id) : { error: 'hook not installed' }),
     msgId,
   );
+}
+
+// HARD send whitelist. When set (observe mode on a real account), EVERY
+// outgoing message must target one of these chat ids - anything else is
+// dropped at this lowest layer, regardless of which code path asked to send.
+let allowedSendTargets = null; // null = unrestricted
+function setAllowedSendTargets(ids) {
+  allowedSendTargets = ids && ids.length ? new Set(ids) : null;
+  if (allowedSendTargets) log.info(`רשימת יעדי שליחה ננעלה: ${allowedSendTargets.size} קבוצות בלבד`);
 }
 
 // Outgoing messages are SERIALIZED and PACED at a human-like rhythm - a
@@ -404,6 +413,10 @@ function pacedSend(task) {
 // Send, then recover the real message id from the chat's own message log so
 // reaction-matching and quoted replies keep working.
 async function sendAndConfirm(client, chatId, content, options = {}) {
+  if (allowedSendTargets && !allowedSendTargets.has(chatId)) {
+    log.info(`(נעילת יעדים) שליחה נחסמה - היעד אינו קבוצת דמו (${chatId.endsWith('@g.us') ? 'קבוצה אחרת' : 'צ׳אט פרטי'})`);
+    return null;
+  }
   let sent = null;
   try {
     sent = await pacedSend(() => client.sendMessage(chatId, content, options));
@@ -449,6 +462,7 @@ module.exports = {
   listGroups,
   resolvePhoneId,
   sendAndConfirm,
+  setAllowedSendTargets,
   installReactionHook,
   installMediaHook,
   fetchMediaById,
