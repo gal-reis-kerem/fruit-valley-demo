@@ -30,7 +30,9 @@ function creds() {
   return {
     host: (s.emailHost || config.emailHost || 'imap.gmail.com').trim(),
     user: (s.emailUser || config.emailUser || '').trim(),
-    pass: (s.emailPassword || config.emailPassword || '').trim(),
+    // Google shows app passwords in spaced groups ("abcd efgh ...") but the
+    // real password is the 16 characters WITHOUT spaces - normalize always
+    pass: (s.emailPassword || config.emailPassword || '').replace(/\s+/g, ''),
   };
 }
 
