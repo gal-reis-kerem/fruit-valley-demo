@@ -26,10 +26,14 @@ function statsFor(orders) {
     (s, o) => s + (o.history || []).filter((h) => ['addition_received', 'order_updated'].includes(h.action)).length,
     0,
   );
+  // The average receive-hour is meaningful only for VARIABLE orders - fixed
+  // orders are issued by OUR schedule (config.fixedIssueHour), so their hour
+  // says nothing about the customer.
+  const variable = orders.filter((o) => o.sourceChannel !== 'fixed_schedule');
   return {
     orders: n,
     avgItems: n ? Math.round(avg(orders.map((o) => o.items.length)) * 10) / 10 : null,
-    avgOrderHour: fmtHour(avg(orders.map((o) => hourOf(o.createdAt)))),
+    avgOrderHour: fmtHour(avg(variable.map((o) => hourOf(o.createdAt)))),
     totalChanges: changes,
     postPrintChanges: postPrint,
     avgVersions: n ? Math.round(avg(orders.map((o) => o.version)) * 10) / 10 : null,

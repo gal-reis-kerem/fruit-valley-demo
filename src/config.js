@@ -45,7 +45,14 @@ const config = {
   fixedOrdersFolderId: process.env.FIXED_ORDERS_FOLDER_ID || '1NBYb8PQIb2rG3U0kYO2u_kULc9F6ZnCk',
   sheetsOrdersFolderId: process.env.SHEETS_ORDERS_FOLDER_ID || '1HPg7IsoKmmaOLi_2sjopzEiKfpxePWKn',
   // Fixed orders are auto-issued on their scheduled delivery day at this hour.
-  fixedIssueHour: process.env.FIXED_ISSUE_HOUR || '06:30',
+  fixedIssueHour: process.env.FIXED_ISSUE_HOUR || '08:00',
+  // Per-office polling windows for the shared-sheets channel (Israel time):
+  // the sheet becomes THE day's order at `start`, then changes are tracked
+  // every `everyMin` minutes until `end`. Offices not listed are polled
+  // continuously (change = order/update).
+  sheetWindows: [
+    { office: 'למונייד', start: '14:00', end: '18:00', everyMin: 30 },
+  ],
   // Email channel (IMAP, read-only). User + app password land in settings.json
   // via the onboarding screen, or here via env.
   emailHost: process.env.EMAIL_HOST || 'imap.gmail.com',

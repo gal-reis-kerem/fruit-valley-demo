@@ -36,12 +36,19 @@ const BIDI_RE = /[‎‏‪-‮⁦-⁩­﻿]/g;
 const clean = (s) => String(s ?? '').replace(BIDI_RE, '').trim();
 
 // Israeli phone -> "0XXXXXXXXX"; keeps nothing else. Never coerced to number.
+// Accepts every format seen in the wild: "+972 5X-XXX-XXXX" (incl. bidi
+// wrappers and non-breaking hyphens), "0097252...", "+97205..." (zero kept
+// after the prefix), bare "05...", and 9 digits with no prefix at all.
 function normalizeIlPhone(raw) {
   const s = clean(raw).replace(/[‐-―−]/g, '-'); // exotic dashes
   let digits = s.replace(/\D/g, '');
-  if (digits.startsWith('972')) digits = '0' + digits.slice(3);
+  if (digits.startsWith('00972')) digits = digits.slice(2); // international 00 prefix
+  if (digits.startsWith('972')) {
+    digits = digits.slice(3);
+    digits = digits.startsWith('0') ? digits : '0' + digits;
+  }
   if (!digits.startsWith('0') && digits.length === 9) digits = '0' + digits;
-  return digits.length >= 9 && digits.length <= 10 ? digits : null;
+  return /^0\d{8,9}$/.test(digits) ? digits : null;
 }
 
 const normalizeEmail = (raw) => {

@@ -73,6 +73,10 @@ test('נרמול טלפונים: תווי כיווניות, מקפים אקזו�
   assert.strictEqual(source.normalizeIlPhone('050-222 8674'), '0502228674');
   assert.strictEqual(source.normalizeIlPhone('+972 52-359-6607'), '0523596607');
   assert.strictEqual(source.normalizeIlPhone('לא טלפון'), null);
+  // פורמטים בינלאומיים נוספים מהגיליון המעודכן
+  assert.strictEqual(source.normalizeIlPhone('00972523596607'), '0523596607');
+  assert.strictEqual(source.normalizeIlPhone('+9720523596607'), '0523596607');
+  assert.strictEqual(source.normalizeIlPhone('\u202a+972 52\u2011359\u20116607\u202c'), '0523596607');
   assert.strictEqual(source.normalizeEmail('  Gal@TriplEP.co.IL '), 'gal@triplep.co.il');
 });
 
