@@ -51,7 +51,24 @@ function saveState(s) {
   fs.writeFileSync(STATE_FILE(), JSON.stringify(s, null, 2));
 }
 
-async function connect() {
+// ONE persistent connection, reused across polls. Reconnecting every poll
+// made Gmail throttle the logins ("Command failed" loops); a single live
+// session with occasional NOOPs is the pattern Gmail expects.
+let conn = null;
+let failStreak = 0;
+let backoffUntil = 0;
+
+function describeImapError(err) {
+  if (err && err.authenticationFailed) {
+    return 'סיסמת האפליקציה נדחתה - יש לחדש אותה ב-myaccount.google.com ← אבטחה ← סיסמאות אפליקציה';
+  }
+  return (err && (err.responseText || err.message)) || String(err);
+}
+
+async function getConnection() {
+  if (conn && conn.usable) return conn;
+  try { if (conn) await conn.logout().catch(() => {}); } catch { /* stale */ }
+  conn = null;
   const c = creds();
   const client = new ImapFlow({
     host: c.host,
@@ -59,54 +76,65 @@ async function connect() {
     secure: true,
     auth: { user: c.user, pass: c.pass },
     logger: false,
-    // a hung socket should fail fast (we reconnect every poll anyway)
-    socketTimeout: 90 * 1000,
+    // must outlive the gap between polls, or the idle socket dies each cycle
+    socketTimeout: 10 * 60 * 1000,
     greetingTimeout: 30 * 1000,
   });
   // CRITICAL: without an 'error' listener, a socket timeout between
-  // operations becomes an UNCAUGHT exception and crashes the whole app
-  // ("A JavaScript error occurred in the main process").
+  // operations becomes an UNCAUGHT exception and crashes the whole app.
   client.on('error', (err) => {
     status.ok = false;
-    status.error = err.message;
-    log.warn(`שגיאת חיבור מייל (סוקט): ${err.message} - הסבב הבא יתחבר מחדש`);
+    status.error = describeImapError(err);
+    if (conn === client) conn = null; // next poll builds a fresh one
+    log.warn(`שגיאת חיבור מייל: ${describeImapError(err)} - יחודש בסבב הבא`);
   });
-  client.on('close', () => { /* expected between polls */ });
+  client.on('close', () => {
+    if (conn === client) conn = null;
+  });
   await client.connect();
-  return client;
+  conn = client;
+  return conn;
 }
 
 // Quick connection check for the onboarding screen / repair dialog.
 async function testConnection() {
   if (!configured()) return { ok: false, error: 'חסרים כתובת מייל או סיסמת אפליקציה' };
   try {
-    const client = await connect();
+    const client = await getConnection();
     const lock = await client.getMailboxLock('INBOX');
     const total = client.mailbox.exists;
     lock.release();
-    await client.logout();
     status.ok = true;
     status.error = null;
+    backoffUntil = 0;
+    failStreak = 0;
     return { ok: true, total };
   } catch (err) {
     status.ok = false;
-    status.error = err.message;
-    return { ok: false, error: err.message };
+    status.error = describeImapError(err);
+    return { ok: false, error: describeImapError(err) };
   }
 }
 
 // One poll pass: fetch new UIDs, keep CRM-sender messages, feed the flow.
+// Repeated failures back off exponentially (up to 15 min) instead of hammering
+// the server every cycle.
 async function pollOnce(getFlow) {
   if (!configured()) return { skipped: 'not_configured' };
+  if (Date.now() < backoffUntil) return { skipped: 'backoff' };
   const state = loadState();
   let client;
   try {
-    client = await connect();
+    client = await getConnection();
+    failStreak = 0;
   } catch (err) {
+    failStreak += 1;
+    const waitMin = Math.min(15, 2 ** failStreak);
+    backoffUntil = Date.now() + waitMin * 60 * 1000;
     status.ok = false;
-    status.error = err.message;
-    log.warn(`חיבור המייל נכשל: ${err.message}`);
-    return { error: err.message };
+    status.error = describeImapError(err);
+    log.warn(`חיבור המייל נכשל (${describeImapError(err)}) - ניסיון הבא בעוד ${waitMin} דק'`);
+    return { error: describeImapError(err) };
   }
   const report = { seen: 0, matched: 0, handled: 0 };
   try {
@@ -171,11 +199,14 @@ async function pollOnce(getFlow) {
     }
   } catch (err) {
     status.ok = false;
-    status.error = err.message;
-    log.warn(`תשאול המייל נכשל: ${err.message}`);
-  } finally {
-    await client.logout().catch(() => {});
+    status.error = describeImapError(err);
+    log.warn(`תשאול המייל נכשל: ${describeImapError(err)}`);
+    // a broken session is discarded; the next poll opens a fresh one
+    try { await client.logout().catch(() => {}); } catch { /* stale */ }
+    if (conn === client) conn = null;
   }
+  // NOTE: on success the connection stays OPEN for the next poll - closing and
+  // re-logging-in every 2 minutes is what made Gmail throttle us.
   return report;
 }
 

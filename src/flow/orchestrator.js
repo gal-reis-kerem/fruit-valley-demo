@@ -337,7 +337,9 @@ class Orchestrator {
 
     let parsed;
     try {
-      parsed = await parseOrderMessage(effectiveBody);
+      // relative dates ("מחר") resolve against the moment the customer SENT
+      // the message - not against processing time (matters for backfill)
+      parsed = await parseOrderMessage(effectiveBody, msg.timestamp ? new Date(msg.timestamp * 1000) : new Date());
     } catch (err) {
       log.error('פרסור הודעה נכשל:', err.message);
       await this.safeReply(msg, '⚠️ לא הצלחתי לעבד את ההודעה, נציג אנושי יטפל בה.');

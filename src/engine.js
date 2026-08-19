@@ -93,7 +93,18 @@ function markProcessed(key) {
 async function backfillOffline(client, flow) {
   const { lastSeenTs } = readSettings();
   if (!lastSeenTs) return;
-  const cutoffSec = Math.floor(lastSeenTs / 1000);
+  // Same-day rule (like email): messages from PREVIOUS days were already
+  // handled by the humans back then - only today's messages are backfilled.
+  const startOfTodayIsrael = (() => {
+    const now = new Date();
+    const dayStr = now.toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' });
+    const offsetMs = now - new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' }));
+    return new Date(new Date(`${dayStr}T00:00:00`).getTime() + offsetMs).getTime();
+  })();
+  const cutoffSec = Math.floor(Math.max(lastSeenTs, startOfTodayIsrael) / 1000);
+  if (startOfTodayIsrael > lastSeenTs) {
+    log.info('השלמת השבתה: הודעות מימים קודמים מדולגות - רק הודעות מהיום מטופלות');
+  }
 
   const groupIds = [
     state.flow && state.flow.pickingGroup && state.flow.pickingGroup.id._serialized,

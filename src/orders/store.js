@@ -182,12 +182,15 @@ function customersOverview(db, companies, date) {
   return companies.map((c) => {
     // An order belongs to a date if it is that date's delivery board
     // (KC-<ddmmyyyy>) or if it had activity on that date.
+    // The board shows the WORK of the selected day: orders that had activity
+    // (received/printed/picked) on that date. An order received yesterday for
+    // delivery today belongs to yesterday's board - it never drags forward.
     const dateOrder = db.orders
       .filter(
         (o) =>
           o.customerName === c.name &&
           !['cancelled', 'archived'].includes(o.status) &&
-          (o.deliveryDate === target || (o.history || []).some((h) => isOnDate(h.ts))),
+          (o.history || []).some((h) => isOnDate(h.ts)),
       )
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] || null;
     let stage = 'none';
