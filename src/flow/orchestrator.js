@@ -31,8 +31,9 @@ class Orchestrator {
     this.pickingGroup = pickingGroup; // Chat object
     this.photosGroup = photosGroup;   // Chat object or null
     this.db = store.loadDB();
-    // A parsed order waiting for the rep to answer "which company?"
-    this.pending = null; // { parsed, rawBody, at }
+    // Parsed orders waiting for a "which customer?" answer, PER CHAT - two
+    // customers can be pending at the same time without trampling each other
+    this.pending = new Map(); // chatId -> { parsed, rawBody, at, candidates }
     // An email order waiting for the rep to say which office it belongs to
     this.pendingEmail = null; // { doc, payload, candidates, at }
   }
@@ -207,7 +208,8 @@ class Orchestrator {
   async handleCustomerMessage(msg, forcedCompany = null, contactCandidates = null) {
     this.reload();
     const body = (msg.body || '').trim();
-    log.info(`הודעה מהנציג: "${body.slice(0, 80)}${body.length > 80 ? '…' : ''}"`);
+    const senderTag = String(msg.from || '').replace(/\D/g, '').replace(/^(\d{4})\d+(\d{2})$/, '$1***$2');
+    log.info(`הודעה מלקוח (${senderTag}): "${body.slice(0, 80)}${body.length > 80 ? '…' : ''}"`);
     bus.naama('הודעה חדשה התקבלה בוואטסאפ');
 
     // Documents (PDF / Excel) arriving over WhatsApp: extract text and run
@@ -316,23 +318,24 @@ class Orchestrator {
       }
     }
 
-    // Is this the answer to a pending "which company?" question?
-    if (this.pending) {
-      const fromCandidates = (this.pending.candidates || []).filter((c) =>
+    // Is this the answer to a pending "which company?" question (of THIS chat)?
+    const pendingHere = this.pending.get(msg.from);
+    if (pendingHere) {
+      const fromCandidates = (pendingHere.candidates || []).filter((c) =>
         String(body).toLowerCase().includes(c.name.toLowerCase()) ||
         (c.aliases || []).some((a) => String(body).toLowerCase().includes(String(a).toLowerCase())),
       );
       const company = fromCandidates.length === 1 ? fromCandidates[0] : this.matchCompanyByText(body);
       if (company) {
-        const { parsed, rawBody } = this.pending;
-        this.pending = null;
+        const { parsed, rawBody } = pendingHere;
+        this.pending.delete(msg.from);
         log.info(`החברה זוהתה מהתשובה: ${company.name}`);
         bus.naama(`הלקוח ענה: ${company.name} — משייכת את ההזמנה`);
         return this.dispatchParsed(msg, parsed, rawBody, company);
       }
-      // Not a company answer — drop the pending draft and process normally
-      log.info('התקבלה הודעה שאינה תשובת חברה - הטיוטה הממתינה נמחקת');
-      this.pending = null;
+      // Not a company answer — drop this chat's pending draft, process normally
+      log.info('התקבלה הודעה שאינה תשובת חברה - הטיוטה הממתינה של הצ׳אט נמחקת');
+      this.pending.delete(msg.from);
     }
 
     let parsed;
@@ -357,6 +360,43 @@ class Orchestrator {
     }
     bus.naama(`קוראת את ההודעה: ${parsed.items.length ? `${parsed.items.length} פריטים` : 'הודעה כללית'}${parsed.company ? ` · ${parsed.company}` : ''}`);
 
+    // Order-as-a-link (Restigo/Zest notifications): the message itself has no
+    // items but carries a URL to the actual order - fetch and parse it.
+    if (!parsed.items.length && /https?:\/\//.test(effectiveBody)) {
+      const linkCompany = forcedCompany || this.findCompany(parsed.company);
+      bus.naama(`ההודעה מכילה קישור להזמנה${linkCompany ? ` של ${linkCompany.name}` : ''} — מושכת את התוכן מהקישור`, true);
+      try {
+        const { fetchOrderLink } = require('../parsers/linkFetch');
+        const fetched = await fetchOrderLink(effectiveBody);
+        if (fetched) {
+          let doc = null;
+          const hint = `הזמנה שהגיעה כקישור (מערכת רסטיגו/זסט)${linkCompany ? ` עבור ${linkCompany.name}` : ''}`;
+          if (fetched.kind === 'pdf') {
+            doc = await parseOrderDocument(fetched.buffer, { hint, accompanyingText: body });
+          } else if (fetched.text && fetched.text.length > 80) {
+            doc = await parseTextOrders(fetched.text, { hint });
+          }
+          if (doc && doc.orders.some((o) => o.items.length)) {
+            let target = linkCompany;
+            if (!target) {
+              const hits = this.matchCompaniesByText(`${doc.customer_name_he || ''} ${doc.customer_name_in_doc || ''}`);
+              if (hits.length === 1) target = hits[0];
+            }
+            if (target) {
+              bus.naama(`ההזמנה נמשכה מהקישור — ${doc.orders.reduce((n, o) => n + o.items.length, 0)} פריטים ל${target.name}`, true);
+              return this.createOrdersFromDoc(target, doc, `קישור הזמנה: ${fetched.url}`, { sourceChannel: 'whatsapp', sourceFormat: 'link' });
+            }
+          }
+          bus.naama('הקישור לא הניב הזמנה קריאה (ייתכן עמוד שדורש התחברות) — נדרש טיפול ידני', true);
+          log.warn(`קישור הזמנה לא פוענח (${fetched.url ? fetched.url.slice(0, 60) : ''}) - manual review`);
+        }
+      } catch (err) {
+        log.warn(`משיכת קישור ההזמנה נכשלה: ${err.message}`);
+        bus.naama('לא הצלחתי למשוך את ההזמנה מהקישור — נדרש טיפול ידני', true);
+      }
+      return; // handled (or surfaced) - never fall through to a generic reply
+    }
+
     if (parsed.classification === 'general') {
       return this.safeReply(msg, this.customerText(parsed, null, replies.general()));
     }
@@ -373,7 +413,7 @@ class Orchestrator {
     if (company && !forcedCompany && ['new_order', 'addition', 'change', 'cancellation'].includes(parsed.classification)) {
       const siblings = this.ambiguousOffice(company, effectiveBody);
       if (siblings) {
-        this.pending = { parsed, rawBody: body, at: Date.now(), candidates: siblings };
+        this.pending.set(msg.from, { parsed, rawBody: body, at: Date.now(), candidates: siblings });
         const offices = siblings.map((c) => c.crm.office).join(' / ');
         bus.naama(`ההודעה מציינת את ${company.crm.payer} בלי משרד — שואלת לאיזה משרד ההזמנה`);
         return this.safeReply(msg, `קיבלתי! לאיזה משרד של ${company.crm.payer} ההזמנה - ${offices}? 🙏`);
@@ -399,7 +439,7 @@ class Orchestrator {
       const candidates =
         (contactCandidates && contactCandidates.length ? contactCandidates : null) ||
         (textCandidates.length > 1 ? textCandidates : null);
-      this.pending = { parsed, rawBody: body, at: Date.now(), candidates };
+      this.pending.set(msg.from, { parsed, rawBody: body, at: Date.now(), candidates });
       bus.naama(candidates
         ? `שיוך לא חד-משמעי (${candidates.length} אפשרויות) — שואלת את הלקוח`
         : 'לא צוין לקוח — שואלת את הלקוח לאיזה לקוח ההזמנה');
@@ -788,32 +828,27 @@ class Orchestrator {
     return order;
   }
 
-  // An updated shared Google Sheet: the table content IS the order.
+  // An updated shared Google Sheet: the table content IS the order. Parsed on
+  // the DOCUMENT model (streaming, 32K output) - sheet tables are big and the
+  // fast text model choked on them ("No text block in model response").
   async handleSheetOrder(company, tableText, { sheetTitle = '' } = {}) {
     this.reload();
     const crm = company.crm || {};
     const floorsHint = crm.displayMode === 'floors'
-      ? ' הלקוח עובד בחלוקה לקומות: עמודות כמות נפרדות (למשל "להזמנה 2", "להזמנה 1-") הן קומות נפרדות - צרי פריט לכל קומה עם הכמות שלה, בלי עמודת הסה"כ.'
+      ? ' הלקוח עובד בחלוקה לקומות: עמודות כמות נפרדות (למשל "להזמנה 2", "להזמנה 1-") הן קומות נפרדות - פריט לכל קומה עם הכמות שלה, בלי עמודת הסה"כ.'
       : '';
-    const parsed = await parseOrderMessage(
-      `זהו תוכן גיליון ההזמנות המשותף של ${company.name}${sheetTitle ? ` ("${sheetTitle}")` : ''}. הטבלה כולה היא ההזמנה המלאה (לא תוספת).${floorsHint}\n\n${tableText}`,
-    );
-    if (!parsed.items.length) {
+    const doc = await parseTextOrders(tableText, {
+      hint: `גיליון ההזמנות המשותף של ${company.name}${sheetTitle ? ` ("${sheetTitle}")` : ''} - הטבלה כולה היא ההזמנה המלאה.${floorsHint}`,
+    });
+    if (!doc.orders.some((o) => o.items.length)) {
       log.warn(`עדכון הגיליון של ${company.name} לא הניב פריטים - לא נוצרה הזמנה`);
+      bus.naama(`הגיליון של ${company.name} לא הניב פריטים — נדרשת בדיקה`, true);
       return;
     }
-    const deliveryDate = parsed.delivery_date ||
-      new Date(Date.now() + 24 * 3600 * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' });
-    const res = await this.createChannelOrder(company, {
-      deliveryDate,
-      items: parsed.items,
-      customerNote: parsed.customer_note,
+    await this.createOrdersFromDoc(company, doc, `גיליון משותף: ${sheetTitle || company.name}`, {
       sourceChannel: 'sheet',
       sourceFormat: 'gsheet',
-      rawMessage: `גיליון משותף: ${sheetTitle || company.name}`,
-      replaceExisting: true,
     });
-    bus.naama(`הזמנת השיטס של ${company.name} ${res.created ? 'נקלטה' : 'עודכנה'} · ${res.order.id}`);
   }
 
   // An email order (body text / Excel / PDF attachments). candidates: the CRM
@@ -852,22 +887,59 @@ class Orchestrator {
     } catch (err) {
       log.error(`פרסור מייל נכשל: ${err.message}`);
     }
+    // Some platform emails carry only a LINK to the order - follow it.
+    if ((!doc || !doc.orders.some((o) => o.items.length)) && /https?:\/\//.test(text)) {
+      try {
+        const { fetchOrderLink } = require('../parsers/linkFetch');
+        const fetched = await fetchOrderLink(text);
+        if (fetched) {
+          if (fetched.kind === 'pdf') doc = await parseOrderDocument(fetched.buffer, { hint: `הזמנה מקישור במייל (נושא: ${subject})` });
+          else if (fetched.text && fetched.text.length > 80) doc = await parseTextOrders(fetched.text, { hint: `עמוד הזמנה מקישור במייל (נושא: ${subject})` });
+        }
+      } catch (err) {
+        log.warn(`משיכת קישור ממייל נכשלה: ${err.message}`);
+      }
+    }
     if (!doc || !doc.orders.length || !doc.orders.some((o) => o.items.length)) {
-      bus.naama('מייל הזמנה לא הניב הזמנה קריאה — הועבר לבדיקה ידנית');
+      bus.naama('מייל הזמנה לא הניב הזמנה קריאה — הועבר לבדיקה ידנית', true);
       log.warn(`מייל ("${subject}") ללא פריטים - manual review`);
       return;
     }
 
-    // 2) resolve the office
+    // 2) resolve the office. Word-level scoring tolerant to spelling variants
+    // (subject "אנבידיה" must match CRM "אינבידיה"): every customer is scored
+    // by how many of its name words appear in the mail; a unique best wins.
     let company = candidates.length === 1 ? candidates[0] : null;
     if (!company) {
-      const hay = `${subject}\n${text}\n${doc.customer_name_in_doc || ''}\n${attachments.map((a) => a.filename).join('\n')}`;
-      const hits = candidates.filter((c) => {
-        const clean = (s) => String(s || '').toLowerCase().replace(/[׳'"״]/g, '');
-        const h = clean(hay);
-        return [c.name, ...(c.aliases || [])].some((n) => n && h.includes(clean(n)));
-      });
-      if (hits.length === 1) company = hits[0];
+      const looseWords = (s) => String(s || '')
+        .toLowerCase()
+        .replace(/[׳'"״`().:,\-_/\\]/g, ' ')
+        .split(/\s+/)
+        .map((w) => w.replace(/[וי]/g, ''))
+        .filter((w) => w.length >= 2);
+      const hay = new Set(looseWords(
+        `${subject} ${text.slice(0, 400)} ${(payload.viaPlatform ? '' : text.slice(400))} ` +
+        `${doc.customer_name_he || ''} ${doc.customer_name_in_doc || ''} ${attachments.map((a) => a.filename).join(' ')}`,
+      ));
+      let best = [];
+      let bestScore = 0;
+      for (const c of candidates) {
+        const words = new Set([
+          ...looseWords(c.name),
+          ...(c.aliases || []).flatMap(looseWords),
+          ...(c.crm ? [...looseWords(c.crm.payer || ''), ...looseWords(c.crm.office || '')] : []),
+        ]);
+        let score = 0;
+        for (const w of words) if (hay.has(w)) score += 1;
+        if (score > bestScore) { bestScore = score; best = [c]; }
+        else if (score === bestScore && score > 0) best.push(c);
+      }
+      if (bestScore > 0 && best.length === 1) company = best[0];
+      else if (bestScore > 0) {
+        // several offices tie (e.g. payer word only) - keep only the tied
+        // ones as candidates for the ask flow below
+        candidates = best;
+      }
     }
     if (!company) {
       this.pendingEmail = { doc, payload, candidates, at: Date.now() };
@@ -887,7 +959,7 @@ class Orchestrator {
 
   // Materialize docParser output (1..N dated lists, e.g. a weekly email) into
   // orders. Undated lists default to tomorrow.
-  async createOrdersFromDoc(company, doc, rawMessage) {
+  async createOrdersFromDoc(company, doc, rawMessage, { sourceChannel = 'email', sourceFormat = 'freetext' } = {}) {
     const tomorrow = () =>
       new Date(Date.now() + 24 * 3600 * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' });
     for (const entry of doc.orders) {
@@ -895,12 +967,12 @@ class Orchestrator {
       const res = await this.createChannelOrder(company, {
         deliveryDate: entry.delivery_date || tomorrow(),
         items: entry.items,
-        sourceChannel: 'email',
-        sourceFormat: 'freetext',
+        sourceChannel,
+        sourceFormat,
         rawMessage,
         replaceExisting: true,
       });
-      bus.naama(`הזמנת מייל של ${company.name} ל-${res.order.deliveryDate} ${res.created ? 'נקלטה' : 'עודכנה'} · ${res.order.id}`);
+      bus.naama(`הזמנה של ${company.name} ל-${res.order.deliveryDate} ${res.created ? 'נקלטה' : 'עודכנה'} · ${res.order.id}`);
     }
   }
 

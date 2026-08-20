@@ -364,6 +364,14 @@ async function launchClient(attempt) {
           return;
         }
 
+        // broken serializations sometimes surface an image THUMBNAIL as the
+        // text body - binary blobs are never messages
+        const bodyStr = (msg.body || '').trim();
+        if (/^\/9j\//.test(bodyStr) || /^[A-Za-z0-9+/=]{120,}$/.test(bodyStr)) {
+          log.info('הודעה עם תוכן בינארי (תמבנייל) - מדולגת');
+          return;
+        }
+
         if (msg.timestamp) markProcessed(`${chatId}|${msg.timestamp}`);
         writeSettings({ lastSeenTs: Date.now() });
 
@@ -497,7 +505,23 @@ async function launchClient(attempt) {
       const phoneId = await resolvePhoneId(client, payload.chatId);
       const crmCompanies = sheets.contactCompanies(phoneId);
       const isRep = phoneId === config.sourceContactId;
-      if (!isRep && !crmCompanies.length) return;
+      if (!isRep && !crmCompanies.length) {
+        // Unknown sender - NEVER a silent drop. If the caption/filename names
+        // a CRM customer unambiguously, process under that customer; either
+        // way surface the number so it can be added to the CRM.
+        const redact = (id) => String(id).replace(/\D/g, '').replace(/^(\d{4})\d+(\d{2})$/, '$1***$2');
+        const hint = `${payload.filename || ''} ${payload.caption || ''}`.trim();
+        const byName = flow.matchCompaniesByText(hint);
+        if (byName.length === 1) {
+          log.warn(`קובץ ממספר שאינו ב-CRM (${redact(phoneId)}) אך הכיתוב מזהה את ${byName[0].name} - מטופל; מומלץ להוסיף את המספר ל-CRM`);
+          bus.naama(`קובץ ממספר לא רשום זוהה לפי הכיתוב כ${byName[0].name} — כדאי להוסיף את המספר ${redact(phoneId)} ל-CRM`, true);
+          await flow.handleCustomerMessage(pseudoMsg, byName[0], null);
+          return;
+        }
+        log.warn(`קובץ ממספר שאינו ב-CRM (${redact(phoneId)}, "${hint.slice(0, 40)}") - לא טופל. הוסיפו את המספר ל-CRM`);
+        bus.naama(`קובץ הזמנה ממספר לא רשום (${redact(phoneId)}) — נדרש שיוך ידני / הוספה ל-CRM`, true);
+        return;
+      }
       const forcedCompany = !isRep && crmCompanies.length === 1 ? crmCompanies[0] : null;
       const candidates = crmCompanies.length > 1 ? crmCompanies : null;
       await flow.handleCustomerMessage(pseudoMsg, forcedCompany, candidates);

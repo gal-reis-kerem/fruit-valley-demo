@@ -55,6 +55,10 @@ const config = {
   ],
   // Email channel (IMAP, read-only). User + app password land in settings.json
   // via the onboarding screen, or here via env.
+  // Platform senders: ordering systems that email on BEHALF of customers
+  // (the customer is named in the subject/body, the sender is the platform).
+  emailPlatformDomains: (process.env.EMAIL_PLATFORM_DOMAINS || 'restigo.co.il,foodnet.co.il')
+    .split(',').map((d) => d.trim().toLowerCase()).filter(Boolean),
   emailHost: process.env.EMAIL_HOST || 'imap.gmail.com',
   emailUser: process.env.EMAIL_USER || '',
   emailPassword: process.env.EMAIL_APP_PASSWORD || '',

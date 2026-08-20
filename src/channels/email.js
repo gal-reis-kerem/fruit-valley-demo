@@ -164,8 +164,20 @@ async function pollOnce(getFlow) {
           continue; // yesterday's (or older) mail - skipped, uid advanced
         }
         const fromAddr = (msg.envelope.from && msg.envelope.from[0] && msg.envelope.from[0].address || '').toLowerCase();
-        const candidates = sheets.contactCompaniesByEmail(fromAddr);
-        if (!candidates.length) continue; // not a CRM contact - ignore silently
+        let candidates = sheets.contactCompaniesByEmail(fromAddr);
+        let viaPlatform = false;
+        if (!candidates.length) {
+          // ordering platforms (Restigo/Foodnet...) email on behalf of
+          // customers - the customer is resolved from subject/content
+          const domain = fromAddr.split('@')[1] || '';
+          if ((config.emailPlatformDomains || []).some((d) => domain === d || domain.endsWith(`.${d}`))) {
+            candidates = require('../config').config.companies;
+            viaPlatform = true;
+            log.info(`מייל מפלטפורמת הזמנות (${domain}): "${(msg.envelope.subject || '').slice(0, 60)}"`);
+          } else {
+            continue; // not a CRM contact and not a known platform
+          }
+        }
         report.matched += 1;
 
         const parsed = await simpleParser(msg.source);
@@ -187,6 +199,7 @@ async function pollOnce(getFlow) {
             subject: parsed.subject || '',
             text: (parsed.text || '').trim(),
             attachments,
+            viaPlatform,
           });
           report.handled += 1;
           status.processed += 1;

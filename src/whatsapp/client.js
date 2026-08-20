@@ -296,6 +296,10 @@ async function installMediaHook(client, onMedia, onEdit = null) {
         const q = Msg.getModelsArray().find((x) => x.id && x.id.id === stanza);
         quotedId = q ? keyToString(q.id) : stanza;
       }
+      // caption: m.caption only. For images/videos m.body holds the base64
+      // THUMBNAIL, not user text - leaking it poisoned the parser.
+      let caption = m.caption || (m.type === 'document' ? '' : '');
+      if (/^\/9j\//.test(caption) || (/^[A-Za-z0-9+/=]{60,}$/.test(caption))) caption = '';
       return {
         msgId: keyToString(m.id),
         chatId: m.id.remote ? (m.id.remote._serialized || String(m.id.remote)) : String(m.from || ''),
@@ -305,7 +309,7 @@ async function installMediaHook(client, onMedia, onEdit = null) {
         type: m.type,
         mimetype: m.mimetype || (m.type === 'image' ? 'image/jpeg' : 'application/octet-stream'),
         filename: m.filename || null,
-        caption: m.caption || (m.type === 'document' ? '' : m.body || '') || '',
+        caption,
         quotedId,
         dataB64,
         error: dataB64 ? null : (lastErr && (lastErr.message || String(lastErr))) || 'download failed',
